@@ -66,7 +66,7 @@ for inst in "$@"; do
   occ "$inst" config:system:set overwrite.cli.url --value="http://nc-$inst" >&2
   occ "$inst" config:system:set auth.bruteforce.protection.enabled --value=false --type=boolean >&2
   occ "$inst" config:system:set ratelimit.protection.enabled --value=false --type=boolean >&2
-  occ "$inst" config:system:set loglevel --value=0 --type=integer >&2
+  occ "$inst" config:system:set loglevel --value=1 --type=integer >&2
   if [ "$federation" = 1 ]; then
     # Servers on a private network speaking http: Nextcloud refuses both by
     # default (SSRF protection; https only).

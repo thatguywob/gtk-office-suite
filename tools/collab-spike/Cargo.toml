@@ -6,7 +6,7 @@
 # or their lockfile, and the Flatpak `--locked` build must not change.
 [workspace]
 resolver = "2"
-members = ["dcp-core", "dcp-conformance", "dcp-matrix", "dcp-wopi", "dcp-interop"]
+members = ["dcp-core", "dcp-conformance", "dcp-matrix", "dcp-wopi", "dcp-interop", "dcp-webdav"]
 
 [workspace.package]
 version = "0.0.0"

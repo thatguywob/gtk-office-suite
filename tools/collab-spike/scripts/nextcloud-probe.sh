@@ -8,8 +8,8 @@
 #
 #   PROBE_OUT=measurements/probe scripts/nextcloud-probe.sh [section...]
 #
-# Sections: server etag races checksum truncated versions props lock
-#           sharing activity time ocm lockapp
+# Sections: server etag etagsame races checksum truncated versions props lock
+#           sharing activity time ocm ocmrecv nolockapp
 set -uo pipefail
 
 PW="${DCP_NC_USER_PASSWORD:-dcp-user-Passw0rd-spike}"
@@ -249,23 +249,113 @@ section_lock() {
   req ul-unlock alice "$A" UNLOCK $f -H 'X-User-Lock: 1'
 }
 
-section_lockapp() {
-  echo; echo "##### files_lock app installed (occ app:install files_lock)"
-  occ a app:install files_lock
-  occ a app:enable files_lock
-  occ a app:list --output=json | python3 -c "import json,sys; d=json.load(sys.stdin); print('files_lock:', d['enabled'].get('files_lock'))"
-  req lockapp-capabilities alice "$A" GET '/ocs/v2.php/cloud/capabilities?format=json'
+section_nolockapp() {
+  echo; echo "##### files_lock DISABLED (occ app:disable files_lock): core locking only"
+  occ a app:disable files_lock
+  occ a app:list --output=json | python3 -c "import json,sys; d=json.load(sys.stdin); print('files_lock enabled:', 'files_lock' in d['enabled'])"
+  req nolock-options alice "$A" OPTIONS /remote.php/dav/files/alice/
+  req nolock-capabilities alice "$A" GET '/ocs/v2.php/cloud/capabilities?format=json'
   python3 -c "
 import json
 d=json.load(open('$BODY'))['ocs']['data']['capabilities']
-print('files capability:', json.dumps(d.get('files'), sort_keys=True))"
-  lock_probe lockapp lockapp.txt
-  local f=/remote.php/dav/files/alice/lockapp-user.txt
-  req lockapp-ul-put alice "$A" PUT $f --data-binary 'x'
-  req lockapp-ul-lock alice "$A" LOCK $f -H 'X-User-Lock: 1' -H 'Content-Type: application/xml' --data "$LOCKINFO"
-  req lockapp-ul-propfind alice "$A" PROPFIND $f -H 'Depth: 0' --data "$PF_NAMED"
-  req lockapp-ul-bob-put bob "$A" PUT /remote.php/dav/files/bob/lockapp-user.txt --data-binary 'bob'
-  req lockapp-ul-unlock alice "$A" UNLOCK $f -H 'X-User-Lock: 1'
+print('files capability:', json.dumps({k:v for k,v in d.get('files',{}).items() if 'lock' in k}, sort_keys=True))"
+  lock_probe nolock nolock.txt
+  local f=/remote.php/dav/files/alice/nolock-user.txt
+  req nolock-ul-put alice "$A" PUT $f --data-binary 'x'
+  req nolock-ul-lock alice "$A" LOCK $f -H 'X-User-Lock: 1' -H 'Content-Type: application/xml' --data "$LOCKINFO"
+  occ a app:enable files_lock
+}
+
+section_etagsame() {
+  echo; echo "##### does the ETag change when a file is replaced by same-size content within the same second?"
+  local f=/remote.php/dav/files/alice/same.txt
+  req same-create alice "$A" PUT $f --data-binary 'aaaa'
+  echo "ETAG0=$(hdr etag)"
+  for i in 1 2 3; do
+    req same-over-$i alice "$A" PUT $f --data-binary "b$i$i$i"
+    echo "ETAG after same-size overwrite $i: $(hdr etag)"
+  done
+  sleep 1.2
+  req same-over-later alice "$A" PUT $f --data-binary 'cccc'
+  echo "ETAG after same-size overwrite one second later: $(hdr etag)"
+  req same-over-bigger alice "$A" PUT $f --data-binary 'cccc-longer'
+  echo "ETAG after a size change: $(hdr etag)"
+  echo "--- the etag across LOCK / UNLOCK"
+  req same-etag-before alice "$A" HEAD $f; echo "before LOCK: $(hdr etag)"
+  req same-lock alice "$A" LOCK $f -H 'Content-Type: application/xml' -H 'Timeout: Second-30' --data "$LOCKINFO"
+  local tok; tok=$(hdr lock-token)
+  req same-etag-locked alice "$A" HEAD $f; echo "while locked: $(hdr etag)"
+  req same-unlock alice "$A" UNLOCK $f -H "Lock-Token: $tok"
+  req same-etag-after alice "$A" HEAD $f; echo "after UNLOCK: $(hdr etag)"
+}
+
+section_ocmrecv() {
+  echo; echo "##### OCM: nc-a shares with a receiver that is a plain HTTP script on the runner (what crosses the wire)"
+  cat > /tmp/ocm_recv.py <<'PY'
+import json, sys, http.server
+LOG = open(sys.argv[1], "a", buffering=1)
+class H(http.server.BaseHTTPRequestHandler):
+    def log_message(self, *a): pass
+    def _body(self):
+        n = int(self.headers.get("Content-Length") or 0)
+        return self.rfile.read(n).decode("utf-8", "replace") if n else ""
+    def _reply(self, code, obj):
+        b = json.dumps(obj).encode()
+        self.send_response(code); self.send_header("Content-Type", "application/json"); self.send_header("Content-Length", str(len(b))); self.end_headers(); self.wfile.write(b)
+    def _rec(self, body):
+        LOG.write(json.dumps({"method": self.command, "path": self.path, "headers": dict(self.headers), "body": body}) + "\n")
+    def do_GET(self):
+        self._rec("")
+        if self.path.startswith("/.well-known/ocm") or self.path.startswith("/ocm-provider"):
+            return self._reply(200, {"enabled": True, "apiVersion": "1.1.0", "endPoint": "http://dcp-host:9099/ocm", "provider": "dcp-probe-receiver",
+                "resourceTypes": [{"name": "file", "shareTypes": ["user"], "protocols": {"webdav": "/webdav/"}}], "capabilities": ["notifications"]})
+        self._reply(404, {})
+    def do_POST(self):
+        b = self._body(); self._rec(b)
+        if self.path.rstrip("/").endswith("/shares"):
+            return self._reply(201, {"recipientDisplayName": "dave"})
+        if self.path.rstrip("/").endswith("/notifications"):
+            return self._reply(201, {})
+        self._reply(404, {})
+http.server.ThreadingHTTPServer(("0.0.0.0", 9099), H).serve_forever()
+PY
+  : > /tmp/ocm_recv.jsonl
+  python3 /tmp/ocm_recv.py /tmp/ocm_recv.jsonl &
+  local pid=$!
+  sleep 1
+  curl -sS http://dcp-host:9099/.well-known/ocm 2>&1 | head -c 200; echo
+  docker exec nc-a curl -sS http://dcp-host:9099/.well-known/ocm 2>&1 | head -c 300; echo
+  req ocr-mkcol alice "$A" MKCOL /remote.php/dav/files/alice/DCP-recv
+  req ocr-put alice "$A" PUT /remote.php/dav/files/alice/DCP-recv/a.txt --data-binary 'hello'
+  req ocr-share alice "$A" POST /ocs/v2.php/apps/files_sharing/api/v1/shares -d path=/DCP-recv -d shareType=6 -d shareWith=dave@http://dcp-host:9099 -d permissions=15 -d format=json
+  sleep 3
+  echo "--- what the receiver was sent:"
+  python3 - <<'PY'
+import json
+for l in open('/tmp/ocm_recv.jsonl'):
+    d = json.loads(l)
+    print(d['method'], d['path'])
+    print('  headers:', json.dumps({k: v for k, v in d['headers'].items() if k.lower() in ('content-type','signature','signature-input','digest','content-digest','date','user-agent','host','authorization')}))
+    if d['body']:
+        try: print('  body:', json.dumps(json.loads(d['body']), indent=1))
+        except Exception: print('  body:', d['body'][:500])
+PY
+  cp /tmp/ocm_recv.jsonl "$OUT/ocm_recv.jsonl"
+  local sid; req ocr-list alice "$A" GET '/ocs/v2.php/apps/files_sharing/api/v1/shares?path=/DCP-recv&format=json'
+  sid=$(jget "d['ocs']['data'][0]['id']")
+  req ocr-update alice "$A" PUT "/ocs/v2.php/apps/files_sharing/api/v1/shares/$sid" -d permissions=1 -d format=json
+  sleep 2
+  req ocr-delete alice "$A" DELETE "/ocs/v2.php/apps/files_sharing/api/v1/shares/$sid?format=json"
+  sleep 2
+  echo "--- after update and unshare:"
+  python3 - <<'PY'
+import json
+for l in list(open('/tmp/ocm_recv.jsonl'))[-4:]:
+    d = json.loads(l)
+    print(d['method'], d['path'], d['body'][:600])
+PY
+  cp /tmp/ocm_recv.jsonl "$OUT/ocm_recv.jsonl"
+  kill $pid 2>/dev/null
 }
 
 section_sharing() {
@@ -360,7 +450,7 @@ section_ocm() {
   occ a config:system:get sharing.federation.allowHttpFallback
   req oc-mkcol alice "$A" MKCOL /remote.php/dav/files/alice/DCP-ocm
   req oc-put alice "$A" PUT /remote.php/dav/files/alice/DCP-ocm/a.txt --data-binary 'hello from a'
-  req oc-share alice "$A" POST /ocs/v2.php/apps/files_sharing/api/v1/shares -d path=/DCP-ocm -d shareType=6 -d shareWith=dave@nc-b -d permissions=15 -d format=json
+  req oc-share alice "$A" POST /ocs/v2.php/apps/files_sharing/api/v1/shares -d path=/DCP-ocm -d shareType=6 -d shareWith=dave@http://nc-b -d permissions=15 -d format=json
   sleep 3
   req oc-pending dave "$B" GET '/ocs/v2.php/apps/files_sharing/api/v1/remote_shares/pending?format=json'
   local rid; rid=$(jget "d['ocs']['data'][0]['id']")
@@ -408,7 +498,7 @@ section_ocm() {
 }
 
 sections=("$@")
-[ "${#sections[@]}" -gt 0 ] || sections=(server etag races checksum truncated versions props lock sharing activity time ocm lockapp)
+[ "${#sections[@]}" -gt 0 ] || sections=(server etag etagsame races checksum truncated versions props lock sharing activity time ocm ocmrecv nolockapp)
 for s in "${sections[@]}"; do
   "section_$s" 2>&1 | tee -a "$OUT/probe-$s.log"
 done
