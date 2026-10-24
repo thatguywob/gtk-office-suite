@@ -1,0 +1,188 @@
+name: collab-spike-e
+
+# RFC-0004 Spike E: the OCM and WebDAV binding measured against real Nextcloud
+# (two instances on one docker network). Not part of the product CI.
+#
+#   probe     raw protocol probe (scripts/nextcloud-probe.sh): every request and
+#             response is in the log and in the `nextcloud-probe` artifact
+#   webdav    dcp-webdav against two real Nextcloud instances: the conformance
+#             journeys on one instance and across a federation, the semantics
+#             tests (ETags, locks, versions, sharing, authorship, latency), and
+#             the Open Cloud Mesh receiver tests. MEASURE lines are in the
+#             `webdav-measurements` artifact.
+#
+# Results and what is not verified: docs/rfc/0004-spike-e-results.md
+#
+# A test that needs Nextcloud FAILS when it is missing; only DCP_SKIP_NEXTCLOUD=1
+# skips it, and the test says so.
+on:
+  push:
+    branches: [spike/collab-e]
+    paths:
+      - 'tools/collab-spike/**'
+      - '.github/workflows/collab-spike-e.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: collab-spike-e-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  CARGO_PROFILE_TEST_DEBUG: line-tables-only
+  CARGO_INCREMENTAL: 0
+  # Pinned by tag and digest (docker hub, 2026-10-24); the images under test are the
+  # matrix entries of each job. Surfaced into the results document.
+  POSTGRES_IMAGE: docker.io/library/postgres:16-alpine@sha256:f4610795587492cd4fb887c2dc3de301b813278bb6f616992061141b5f15ac36
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    name: protocol probe (two Nextcloud ${{ matrix.version }} instances)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - version: '34.0.5'
+            image: docker.io/library/nextcloud:34.0.5-apache@sha256:1f9212adecae32010cdbf137d7e0db78d08c696dc3e77f1eddcbf902d10209b4
+          - version: '35.0.2'
+            image: docker.io/library/nextcloud:35.0.2-apache@sha256:89af7ee7a96ff5e9668280566209268ae6b2d02327f6ef6d56f6d68228cf9431
+    env:
+      NEXTCLOUD_IMAGE: ${{ matrix.image }}
+    defaults:
+      run:
+        working-directory: tools/collab-spike
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Versions
+        run: |
+          docker --version
+          echo "$NEXTCLOUD_IMAGE"
+          echo "$POSTGRES_IMAGE"
+      - name: Start two Nextcloud instances
+        run: scripts/nextcloud-up.sh a b 2>&1 | tee "$RUNNER_TEMP/up.log"
+      - name: Probe
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/measurements"
+          PROBE_OUT="$GITHUB_WORKSPACE/measurements/probe" scripts/nextcloud-probe.sh 2>&1 | tee "$GITHUB_WORKSPACE/measurements/probe.log"
+      - name: Without the files_lock app, LOCK is not implemented
+        run: |
+          grep -A1 '^=== \[nolock-lock\]' "$GITHUB_WORKSPACE/measurements/probe.log" | grep -q 'status: 501'
+          grep -A1 '^=== \[lock-core-lock\]' "$GITHUB_WORKSPACE/measurements/probe.log" | grep -q 'status: 200'
+      - name: Container logs
+        if: always()
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/measurements"
+          for c in nc-a nc-b; do
+            docker logs "$c" > "$GITHUB_WORKSPACE/measurements/$c.docker.log" 2>&1 || true
+            docker exec "$c" cat /var/www/html/data/nextcloud.log > "$GITHUB_WORKSPACE/measurements/$c.nextcloud.log" 2>&1 || true
+          done
+          cp "$RUNNER_TEMP/up.log" "$GITHUB_WORKSPACE/measurements/up.log" || true
+      - name: Upload measurements
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: nextcloud-probe-${{ matrix.version }}
+          path: measurements/
+          if-no-files-found: warn
+
+  webdav:
+    name: dcp-webdav against Nextcloud ${{ matrix.version }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - version: '34.0.5'
+            image: docker.io/library/nextcloud:34.0.5-apache@sha256:1f9212adecae32010cdbf137d7e0db78d08c696dc3e77f1eddcbf902d10209b4
+          - version: '35.0.2'
+            image: docker.io/library/nextcloud:35.0.2-apache@sha256:89af7ee7a96ff5e9668280566209268ae6b2d02327f6ef6d56f6d68228cf9431
+    defaults:
+      run:
+        working-directory: tools/collab-spike
+    env:
+      NEXTCLOUD_IMAGE: ${{ matrix.image }}
+      DCP_MEASURE_OUT: ${{ github.workspace }}/measurements/measure.jsonl
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          workspaces: tools/collab-spike
+          shared-key: collab-spike-e
+      - name: Versions
+        run: |
+          rustc --version
+          cargo --version
+          docker --version
+          echo "$NEXTCLOUD_IMAGE"
+          echo "$POSTGRES_IMAGE"
+          echo "git $(git rev-parse HEAD)"
+      - name: Build
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/measurements"
+          cargo test -p dcp-webdav --no-run
+      - name: Unit tests (the multistatus reader)
+        run: cargo test -p dcp-webdav --lib -- --nocapture
+      - name: A test that needs Nextcloud FAILS when it is missing
+        # No Nextcloud runs yet. The step passes only if cargo test fails AND says why.
+        env:
+          DCP_NEXTCLOUD_A_URL: http://127.0.0.1:9
+        run: |
+          if cargo test -p dcp-webdav --test conformance_over_nextcloud -- --nocapture > "$RUNNER_TEMP/missing.log" 2>&1; then
+            cat "$RUNNER_TEMP/missing.log"
+            echo "::error::the conformance test passed with no Nextcloud running"
+            exit 1
+          fi
+          grep -q "Nextcloud is not reachable" "$RUNNER_TEMP/missing.log"
+      - name: DCP_SKIP_NEXTCLOUD=1 skips explicitly and says so
+        env:
+          DCP_SKIP_NEXTCLOUD: '1'
+        run: |
+          cargo test -p dcp-webdav --test conformance_over_nextcloud -- --nocapture 2>&1 | tee "$RUNNER_TEMP/skip.log"
+          test "$(grep -c '^SKIPPED ' "$RUNNER_TEMP/skip.log")" -eq 3
+      - name: Start two Nextcloud instances
+        run: scripts/nextcloud-up.sh a b 2>&1 | tee "$RUNNER_TEMP/up.log"
+      - name: Conformance journeys on one Nextcloud
+        shell: bash
+        run: cargo test -p dcp-webdav --test conformance_over_nextcloud -- --nocapture --test-threads=1 2>&1 | tee "$GITHUB_WORKSPACE/measurements/conformance-one.log"
+      - name: Conformance journeys across a federation (alice on A, bob and carol on B)
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: cargo test -p dcp-webdav --test conformance_over_ocm -- --nocapture --test-threads=1 2>&1 | tee "$GITHUB_WORKSPACE/measurements/conformance-federated.log"
+      - name: Semantics (ETags, locks, versions, properties, sharing, authorship, clock, latency)
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: cargo test -p dcp-webdav --test nextcloud_semantics -- --nocapture --test-threads=1 2>&1 | tee "$GITHUB_WORKSPACE/measurements/semantics.log"
+      - name: OCM (discovery, a receiver holding only the share secret, locks across a federation)
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: cargo test -p dcp-webdav --test federation -- --nocapture --test-threads=1 2>&1 | tee "$GITHUB_WORKSPACE/measurements/federation.log"
+      - name: Spec test 5 with the lease duration as a parameter (4 s and 20 s, both topologies)
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: cargo test -p dcp-webdav --test lease_timing -- --nocapture --test-threads=1 2>&1 | tee "$GITHUB_WORKSPACE/measurements/lease-timing.log"
+      - name: Container logs
+        if: always()
+        run: |
+          for c in nc-a nc-b; do
+            docker logs "$c" > "$GITHUB_WORKSPACE/measurements/$c.docker.log" 2>&1 || true
+            docker exec "$c" cat /var/www/html/data/nextcloud.log > "$GITHUB_WORKSPACE/measurements/$c.nextcloud.log" 2>&1 || true
+          done
+          cp "$RUNNER_TEMP/up.log" "$GITHUB_WORKSPACE/measurements/up.log" || true
+      - name: Upload measurements
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: webdav-measurements-${{ matrix.version }}
+          path: measurements/
+          if-no-files-found: warn
