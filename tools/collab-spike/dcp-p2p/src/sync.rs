@@ -116,13 +116,20 @@ impl Inner {
                 return Err(format!("unknown document {}", hello.doc));
             }
         };
+        // Take the document's read lock BEFORE the membership check: a writer that changes
+        // membership holds it exclusively until the new member list has reached the gate, so a
+        // session either runs entirely before the change or sees it entirely, never the new
+        // operations with the old gate.
+        let guard = doc.serving.read().await;
         if !self.sync_allowed(&doc, &remote_key) {
+            drop(guard);
             doc.st.borrow_mut().counters.sync_denied += 1;
             write_status(&mut send, STATUS_DENIED).await?;
             let _ = send.finish();
             return Err(format!("{} is not a member of {}", principal_of(&remote_key), doc.id));
         }
         if let Some(op) = hello.barrier {
+            drop(guard);
             let ok = match op.parse::<Hash>() {
                 Ok(h) => self.wait_applied(&doc, h, BARRIER_WAIT).await,
                 Err(_) => false,
@@ -133,10 +140,8 @@ impl Inner {
         }
         write_status(&mut send, STATUS_OK).await?;
         let logs = doc.logs(&self.me);
-        let out = {
-            let _r = doc.serving.read().await;
-            run_session(&doc.store, logs, send, recv).await
-        };
+        let out = run_session(&doc.store, logs, send, recv).await;
+        drop(guard);
         let got = out.ops.len();
         self.ingest(&doc, out.ops).await.map_err(|e| e.to_string())?;
         if got > 0 {

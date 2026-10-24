@@ -186,7 +186,11 @@ impl Inner {
         if doc.level_of(&target).is_none() {
             return Err(StoreError::NotFound(format!("{principal} is not a member")));
         }
-        let space_msg = self.remove_member(doc, target).await?;
+        // No session may read the removal before the gate knows the member is gone.
+        let space_msg = {
+            let _w = doc.serving.write().await;
+            self.remove_member(doc, target).await?
+        };
         drop(_g);
         // Wait until every reachable remaining member has applied the removal, so what they
         // publish next is encrypted to the rotated key. An unreachable member cannot be waited for:
