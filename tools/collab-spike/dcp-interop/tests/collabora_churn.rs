@@ -160,7 +160,22 @@ async fn a_scripted_collabora_session_and_the_homeservers_event_limits() {
         }
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
-    // Let anything the host queued after the UNLOCK land.
+    // Collabora gives up on a WOPI call after about 3 s (its log says
+    // "Timeout while requesting ... after 3003ms"). A call the host is still
+    // working on when the connection drops is not logged as completed, but its
+    // effect lands when the homeserver lets the event through. So, when no UNLOCK
+    // was seen, wait (up to `DCP_CHURN_EXTRA_SECS`, 120) for the lease to read
+    // released before counting; then let anything else the host queued land.
+    if unlock_after.is_none() {
+        let extra = Instant::now();
+        while extra.elapsed() < Duration::from_secs(env_u64("DCP_CHURN_EXTRA_SECS", 120)) {
+            if matches!(owner.lease(&rig.doc).await, Ok(Some(l)) if l.body.state == dcp_core::LeaseState::Released) {
+                println!("CHURN the lease read released {:.1} s after the tail ended, with no completed UNLOCK in the host's log", extra.elapsed().as_secs_f64());
+                break;
+            }
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+    }
     tokio::time::sleep(Duration::from_secs(5)).await;
     let t1 = now_ms();
     let log = rig.host.request_log();

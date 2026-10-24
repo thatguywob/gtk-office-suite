@@ -55,6 +55,10 @@ jobs:
           # Every principal's message budget spent first: each event is then paced by the homeserver.
           - { tag: default-drained, profile: default, drain: '1', suite: conformance,   tests: '--test conformance',     threads: 6 }
           - { tag: default-drained, profile: default, drain: '1', suite: cross_binding, tests: '--test cross_binding',   threads: 6 }
+          # How long a WOPI client waits per operation (Collabora abandons a call after ~3 s).
+          - { tag: relaxed,         profile: relaxed, drain: '',  suite: latency,       tests: '--test wopi_latency',     threads: 1 }
+          - { tag: default,         profile: default, drain: '',  suite: latency,       tests: '--test wopi_latency',     threads: 1 }
+          - { tag: default-drained, profile: default, drain: '1', suite: latency,       tests: '--test wopi_latency',     threads: 1 }
     defaults:
       run:
         working-directory: tools/collab-spike
@@ -86,7 +90,7 @@ jobs:
           cargo test -p dcp-interop --locked --no-fail-fast ${{ matrix.tests }} -- --nocapture --test-threads=${{ matrix.threads }} 2>&1 | tee "$GITHUB_WORKSPACE/out/${{ matrix.tag }}-${{ matrix.suite }}.log"
       - name: Timings
         if: ${{ !cancelled() }}
-        run: grep -h "^TIMING" "$GITHUB_WORKSPACE/out/${{ matrix.tag }}-${{ matrix.suite }}.log" | sort -k2,3 || true
+        run: grep -h "^TIMING\|^LATENCY" "$GITHUB_WORKSPACE/out/${{ matrix.tag }}-${{ matrix.suite }}.log" | sort -k2,3 || true
       - name: Upload
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
@@ -269,7 +273,11 @@ jobs:
           cargo test -p dcp-interop --locked --test collabora_churn -- --nocapture --test-threads=1 2>&1 | tee "$GITHUB_WORKSPACE/out/churn-aggressive-drained.log"
       - name: Summary
         if: ${{ !cancelled() }}
-        run: grep -h "^CHURN" "$GITHUB_WORKSPACE"/out/churn-*.log || true
+        run: |
+          grep -h "^CHURN" "$GITHUB_WORKSPACE"/out/churn-*.log || true
+          echo "--- what Collabora logged about the WOPI host timing out"
+          for f in "$GITHUB_WORKSPACE"/out/collabora-*.log; do echo "$f: $(grep -c 'CheckTimeout' "$f") CheckTimeout lines"; done
+          grep -h "CheckTimeout\|Failed to UNLOCK\|No session left to unlock\|Un-successful" "$GITHUB_WORKSPACE"/out/collabora-*.log | cut -c1-300 || true
       - name: Upload
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
