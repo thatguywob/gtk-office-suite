@@ -10,6 +10,8 @@ use std::time::{Duration, Instant};
 use common::*;
 use dcp_conformance::{new_file, run_one, Outcome};
 use dcp_core::view::read_view;
+use async_trait::async_trait;
+use dcp_core::lease::{self, Acquire, Claim, Pause, Settle};
 use dcp_core::{graph, DocumentStore, Role, StoreError};
 use dcp_p2p::envelope::blob_of_locator;
 use dcp_p2p::net::{read_status, write_hello, Hello, STATUS_OK, SYNC_ALPN};
@@ -424,4 +426,52 @@ async fn an_inline_update_of_the_maximum_size_goes_through() {
         .await;
         eprintln!("MEASURE inline update {size} bytes: publish {publish_ms} ms, at the owner {} ms later", t.elapsed().as_millis());
     }
+}
+
+// ------------------------------------------------------------------- leases across a partition
+
+struct Sleep;
+
+#[async_trait]
+impl Pause for Sleep {
+    async fn pause(&self, ms: u64) {
+        tokio::time::sleep(Duration::from_millis(ms)).await;
+    }
+}
+
+/// With no coordinator a lease cannot be exclusive across a partition: both sides acquire, both
+/// read back their own record twice, both believe they hold it. When the partition heals the
+/// deterministic winner rule leaves exactly one holder and the other learns it at its next read.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn partitioned_sessions_both_acquire_the_lease_and_the_merge_picks_one() {
+    init_logging();
+    let (owner, editor, _viewer, doc) = default_trio().await;
+    let first = first_version(&owner, &doc).await;
+    let (co, ce) = (
+        Claim::new(owner.principal(), "session-owner", "token-owner", &first, 60_000),
+        Claim::new(editor.principal(), "session-editor", "token-editor", &first, 60_000),
+    );
+    owner.set_online(false).await.unwrap();
+    editor.set_online(false).await.unwrap();
+    let st = Settle::new(&Sleep, 500);
+    let ro = lease::acquire(&*owner, &doc, &co, &st).await.unwrap();
+    let re = lease::acquire(&*editor, &doc, &ce, &st).await.unwrap();
+    assert!(matches!(ro, Acquire::Acquired(_)), "{ro:?}");
+    assert!(matches!(re, Acquire::Acquired(_)), "both sides, partitioned, believe they hold the lease: {re:?}");
+    assert!(lease::holds(&*owner, &doc, &co.holder).await.unwrap());
+    assert!(lease::holds(&*editor, &doc, &ce.holder).await.unwrap());
+
+    let t0 = Instant::now();
+    owner.set_online(true).await.unwrap();
+    editor.set_online(true).await.unwrap();
+    wait_for("exactly one holder after the merge", Duration::from_secs(30), || async {
+        let a = lease::holds(&*owner, &doc, &co.holder).await.ok()?;
+        let b = lease::holds(&*editor, &doc, &ce.holder).await.ok()?;
+        (a != b).then_some(())
+    })
+    .await;
+    eprintln!("MEASURE partitioned lease: both acquired while apart; exactly one holder {} ms after the partition healed", t0.elapsed().as_millis());
+    let lo = owner.lease(&doc).await.unwrap().unwrap();
+    let le = editor.lease(&doc).await.unwrap().unwrap();
+    assert_eq!(lo.id, le.id, "both nodes name the same winning record");
 }

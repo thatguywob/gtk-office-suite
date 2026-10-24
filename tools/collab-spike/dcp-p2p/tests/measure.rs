@@ -210,10 +210,14 @@ async fn lease_propagation_latency() {
         let lease = claim.lease_over(None);
         let t = Instant::now();
         let w = a.write_lease(&doc, lease).await.unwrap();
-        wait_for("b sees the lease", Duration::from_secs(10), || async {
-            (b.lease(&doc).await.ok()??.id == w.id).then_some(())
-        })
-        .await;
+        // Poll every 2 ms so the resolution is not the poll interval.
+        loop {
+            if b.lease(&doc).await.ok().flatten().map(|l| l.id) == Some(w.id.clone()) {
+                break;
+            }
+            assert!(t.elapsed() < Duration::from_secs(10), "the lease never arrived");
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
         lat.push(t.elapsed().as_micros());
     }
     lat.sort_unstable();

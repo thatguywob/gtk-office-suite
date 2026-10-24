@@ -36,8 +36,34 @@ async fn nodes_reach_each_other_through_a_relay_and_sync_a_document() {
     eprintln!("MEASURE relay-only addresses: from the grant until the viewer lists the version: {} ms", t.elapsed().as_millis());
     let v = b.versions(&doc).await.unwrap().remove(0);
     assert_eq!(b.fetch_file(&doc, &v).await.unwrap(), b"through a relay");
-    // A cold session over a fresh connection, timed.
-    let t = Instant::now();
-    let s = b.sync_now(&doc, &a.principal()).await.unwrap();
-    eprintln!("MEASURE sync session through the relay: {} us, moved {} / {} operations", t.elapsed().as_micros(), s.received_operations, s.sent_operations);
+    // A session over the open connection, timed, and the same on a pair with direct addresses in
+    // this same build and process.
+    let mut via = Vec::new();
+    for _ in 0..10 {
+        let t = Instant::now();
+        b.sync_now(&doc, &a.principal()).await.unwrap();
+        via.push(t.elapsed().as_micros());
+    }
+    let c = node(cfg()).await;
+    let d = node(cfg()).await;
+    mesh(&[&c, &d]).await;
+    let doc2 = c.create_document(&standard_meta(), Some(new_file(b"direct"))).await.unwrap();
+    invite(&c, &d, &doc2).await;
+    c.grant(&doc2, &d.principal(), Role::Viewer).await.unwrap();
+    wait_for("d reads the document", Duration::from_secs(60), || async {
+        (d.versions(&doc2).await.ok()?.len() == 1).then_some(())
+    })
+    .await;
+    let mut direct = Vec::new();
+    for _ in 0..10 {
+        let t = Instant::now();
+        d.sync_now(&doc2, &c.principal()).await.unwrap();
+        direct.push(t.elapsed().as_micros());
+    }
+    via.sort_unstable();
+    direct.sort_unstable();
+    eprintln!(
+        "MEASURE sync session over an open connection, median of 10: relay-only addresses {} us, direct addresses {} us (same debug build)",
+        via[5], direct[5]
+    );
 }
