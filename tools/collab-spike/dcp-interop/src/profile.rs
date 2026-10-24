@@ -323,7 +323,7 @@ pub async fn run_all_timed(factory: &InteropFactory) -> Report {
         };
         let secs = t.elapsed().as_secs_f64();
         let spent = stats_since(factory.stats_total(), before);
-        let (label, detail) = match &r.outcome {
+        let (verdict, detail) = match &r.outcome {
             Outcome::Passed => ("passed", String::new()),
             Outcome::Failed(f) => ("failed", f.0.clone()),
             Outcome::Skipped { missing } => ("skipped", missing.join(",")),
@@ -335,7 +335,7 @@ pub async fn run_all_timed(factory: &InteropFactory) -> Report {
             profile: label(&syn),
             setup_secs: 0.0,
             secs,
-            outcome: label,
+            outcome: verdict,
             detail,
             sent: spent.sent,
             rate_limited: spent.rate_limited,
