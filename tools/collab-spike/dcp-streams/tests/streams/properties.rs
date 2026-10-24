@@ -767,6 +767,66 @@ async fn the_control_stream_ignores_forged_replayed_and_out_of_order_epochs() {
     assert_eq!(extra.versions(&rig.doc).await.unwrap().len(), 1);
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn two_owners_changing_the_roster_at_once_never_fork_the_document() {
+    let base = require_streams!();
+    let rig = Rig::new(&base).await;
+    rig.owner
+        .grant(&rig.doc, &rig.editor.principal(), Role::Owner)
+        .await
+        .unwrap();
+    let (mut both, mut one) = (0, 0);
+    let mut granted = Vec::new();
+    for round in 0..8 {
+        let (x, y) = (store_at(&base, "X"), store_at(&base, "Y"));
+        let (xp, yp) = (x.principal(), y.principal());
+        let (rx, ry) = tokio::join!(
+            rig.owner.grant(&rig.doc, &xp, Role::Viewer),
+            rig.editor.grant(&rig.doc, &yp, Role::Viewer)
+        );
+        match (&rx, &ry) {
+            (Ok(()), Ok(())) => both += 1,
+            (Ok(()), Err(StoreError::Conflict(_))) | (Err(StoreError::Conflict(_)), Ok(())) => {
+                one += 1
+            }
+            other => panic!("round {round}: {other:?}"),
+        }
+        if rx.is_ok() {
+            granted.push(x);
+        }
+        if ry.is_ok() {
+            granted.push(y);
+        }
+    }
+    println!("ROTATION RACE over 8 rounds: both succeeded in sequence {both}, one lost the race and was told so {one}");
+    // One chain: every client agrees on the epochs, and everyone who was told "granted" is a member.
+    let a = rig.owner.epochs(&rig.doc).await;
+    rig.editor.sync(&rig.doc).await.unwrap();
+    rig.owner.sync(&rig.doc).await.unwrap();
+    let a2 = rig.owner.epochs(&rig.doc).await;
+    let b = rig.editor.epochs(&rig.doc).await;
+    assert_eq!(
+        a2.iter().map(|e| &e.2).collect::<Vec<_>>(),
+        b.iter().map(|e| &e.2).collect::<Vec<_>>()
+    );
+    assert!(a2.len() >= a.len());
+    for g in &granted {
+        assert_eq!(g.role(&rig.doc).await.unwrap(), Role::Viewer);
+        assert!(!g.versions(&rig.doc).await.unwrap().is_empty());
+    }
+    // And the document still works.
+    rig.editor
+        .publish_version(
+            &rig.doc,
+            vec![rig.first.clone()],
+            new_file(b"still fine"),
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(rig.owner.versions(&rig.doc).await.unwrap().len(), 2);
+}
+
 fn forged_prev(last: &Value) -> String {
     let rec: dcp_streams::wire::EpochRecord = serde_json::from_value(last.clone()).unwrap();
     rec.id()
