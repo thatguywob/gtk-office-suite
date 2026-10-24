@@ -1,10 +1,13 @@
+# Its own workspace (and lockfile): see the `exclude` in ../Cargo.toml.
+[workspace]
+
 [package]
 name = "dcp-p2p"
 description = "DCP draft-1 peer-to-peer binding (iroh + p2panda), Spike C of RFC-0004."
-version.workspace = true
-edition.workspace = true
-publish.workspace = true
-license.workspace = true
+version = "0.0.0"
+edition = "2021"
+publish = false
+license = "GPL-3.0-or-later"
 
 [features]
 # Tests that run a relay server in-process (pulls in iroh's relay server).
@@ -12,14 +15,12 @@ relay-test = ["iroh/test-utils", "dep:iroh-relay"]
 
 [dependencies]
 dcp-core = { path = "../dcp-core" }
-async-trait.workspace = true
-base64.workspace = true
-hex.workspace = true
-serde.workspace = true
-serde_json.workspace = true
-sha2.workspace = true
-thiserror.workspace = true
-tokio = { workspace = true, features = ["rt", "net", "io-util", "sync", "time", "macros", "rt-multi-thread"] }
+async-trait = "0.1"
+hex = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["rt", "net", "io-util", "sync", "time", "macros", "rt-multi-thread"] }
 
 # p2panda 0.7.1 (crates.io, 2026-08-21): the pieces the binding really uses.
 p2panda-core = "=0.7.1"

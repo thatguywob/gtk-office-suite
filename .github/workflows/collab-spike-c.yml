@@ -39,7 +39,7 @@ jobs:
     timeout-minutes: 60
     defaults:
       run:
-        working-directory: tools/collab-spike
+        working-directory: tools/collab-spike/dcp-p2p
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Install Rust stable
@@ -48,7 +48,7 @@ jobs:
           toolchain: stable
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
-          workspaces: tools/collab-spike
+          workspaces: tools/collab-spike/dcp-p2p
           shared-key: collab-spike-c
       - name: Versions
         run: |
@@ -95,4 +95,84 @@ jobs:
         with:
           name: spike-c-upstream
           path: upstream.txt
+          if-no-files-found: warn
+
+  test:
+    name: dcp-p2p journeys and p2p-specific tests (debug build)
+    needs: check
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    defaults:
+      run:
+        working-directory: tools/collab-spike/dcp-p2p
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          workspaces: tools/collab-spike/dcp-p2p
+          shared-key: collab-spike-c-test
+      - name: Output directory
+        run: mkdir -p "$GITHUB_WORKSPACE/results"
+      - name: Build tests
+        run: cargo test --no-run
+      - name: The 512-element header limit (measured)
+        if: always()
+        run: cargo test --test header_limit -- --nocapture --test-threads=1 2>&1 | tee "$GITHUB_WORKSPACE/results/header_limit.log"
+      - name: Spec section 12 journeys through run_all, and the negative control
+        if: always()
+        run: |
+          set -o pipefail
+          cargo test --test conformance -- --nocapture --test-threads=1 2>&1 | tee "$GITHUB_WORKSPACE/results/conformance.log"
+      - name: Tests conformance cannot see
+        if: always()
+        run: |
+          set -o pipefail
+          cargo test --test p2p -- --nocapture --test-threads=1 2>&1 | tee "$GITHUB_WORKSPACE/results/p2p.log"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        if: always()
+        with:
+          name: spike-c-test
+          path: results/
+          if-no-files-found: warn
+
+  measure:
+    name: measurements (release build)
+    needs: check
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    defaults:
+      run:
+        working-directory: tools/collab-spike/dcp-p2p
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          workspaces: tools/collab-spike/dcp-p2p
+          shared-key: collab-spike-c-measure
+      - name: Machine
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/results"
+          { rustc --version; cargo --version; nproc; free -m; lscpu | grep 'Model name'; } | tee "$GITHUB_WORKSPACE/results/machine.txt"
+      - name: Measurements
+        run: |
+          set -o pipefail
+          cargo test --release --test measure -- --ignored --test-threads=1 --nocapture 2>&1 | tee "$GITHUB_WORKSPACE/results/measure.log"
+      - name: The p2p tests again in release mode (timings of the offline and partition tests)
+        if: always()
+        run: |
+          set -o pipefail
+          cargo test --release --test p2p -- --nocapture --test-threads=1 2>&1 | tee "$GITHUB_WORKSPACE/results/p2p-release.log"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        if: always()
+        with:
+          name: spike-c-measure
+          path: results/
           if-no-files-found: warn

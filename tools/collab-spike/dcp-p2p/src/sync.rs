@@ -133,13 +133,22 @@ impl Inner {
         }
         write_status(&mut send, STATUS_OK).await?;
         let logs = doc.logs(&self.me);
-        let (ops, stats) = run_session(&doc.store, logs, send, recv).await?;
-        doc.st.borrow_mut().counters.sync_sessions += 1;
-        self.ingest(&doc, ops).await.map_err(|e| e.to_string())?;
-        if stats.received_operations > 0 {
+        let out = run_session(&doc.store, logs, send, recv).await;
+        let got = out.ops.len();
+        self.ingest(&doc, out.ops).await.map_err(|e| e.to_string())?;
+        if got > 0 {
             self.changed.notify_one();
         }
-        Ok(())
+        match out.error {
+            None => {
+                doc.st.borrow_mut().counters.sync_sessions += 1;
+                Ok(())
+            }
+            Some(e) => {
+                doc.st.borrow_mut().counters.sync_failures += 1;
+                Err(e)
+            }
+        }
     }
 
     async fn wait_applied(&self, doc: &Rc<Doc>, op: Hash, max: Duration) -> bool {
@@ -203,13 +212,19 @@ impl Inner {
             return Err(format!("{} refused to sync {}", principal_of(&peer), doc.id));
         }
         let logs = doc.logs(&self.me);
-        let (ops, stats) = run_session(&doc.store, logs, send, recv).await?;
-        doc.st.borrow_mut().counters.sync_sessions += 1;
-        self.ingest(doc, ops).await.map_err(|e| e.to_string())?;
-        if stats.received_operations > 0 || stats.sent_operations > 0 {
-            self.changed.notify_one();
+        let out = run_session(&doc.store, logs, send, recv).await;
+        self.ingest(doc, out.ops).await.map_err(|e| e.to_string())?;
+        match (out.stats, out.error) {
+            (Some(stats), None) => {
+                doc.st.borrow_mut().counters.sync_sessions += 1;
+                if stats.received_operations > 0 || stats.sent_operations > 0 {
+                    self.changed.notify_one();
+                }
+                Ok(stats)
+            }
+            (_, Some(e)) => Err(e),
+            (None, None) => Err("the session produced no result".into()),
         }
-        Ok(stats)
     }
 
     /// Ask for a sync with `peer` now; at most one session per (document, peer) runs at a time,

@@ -65,6 +65,12 @@ pub struct P2pConfig {
     pub fetch_timeout: Duration,
     /// A device id; random when `None`.
     pub device: Option<String>,
+    /// Apply the reader's authorisation rule (`auth_check.rs`) when listing entries. `false`
+    /// exists only for the negative control of the forged-version journey.
+    pub authorize: bool,
+    /// Stamp a lease with the AUTHOR's clock reading instead of the reader's first-seen time.
+    /// `true` exists only for the negative control of the clock-skew test.
+    pub author_stamped_leases: bool,
 }
 
 impl Default for P2pConfig {
@@ -77,6 +83,8 @@ impl Default for P2pConfig {
             enforce_acl: true,
             fetch_timeout: Duration::from_secs(60),
             device: None,
+            authorize: true,
+            author_stamped_leases: false,
         }
     }
 }
@@ -91,6 +99,14 @@ pub struct Entry {
     pub seen_ms: u64,
     pub heads: BTreeSet<Hash>,
     pub env: Envelope,
+}
+
+#[derive(Clone, Debug)]
+pub struct BlobFetch {
+    pub blob: String,
+    pub bytes: u64,
+    /// Wall time of `remote().fetch` alone (connect included), in microseconds.
+    pub micros: u64,
 }
 
 #[derive(Default, Clone, Debug)]
@@ -118,6 +134,7 @@ pub struct DocState {
     pub blob_ready: HashSet<String>,
     pub blob_fetching: HashSet<String>,
     pub lease_lamport: u64,
+    pub blob_fetches: Vec<BlobFetch>,
     pub cache: Option<Rc<SpacesStoreState<()>>>,
     pub counters: Counters,
 }

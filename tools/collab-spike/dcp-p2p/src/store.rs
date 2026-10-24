@@ -177,15 +177,14 @@ impl P2pStore {
         .await
     }
 
-    /// Run a sync with `peer` now and return how many operations moved each way.
-    pub async fn sync_now(&self, doc: &DocId, peer: &str) -> Result<(u32, u32)> {
+    /// Run a sync with `peer` now and return what moved each way.
+    pub async fn sync_now(&self, doc: &DocId, peer: &str) -> Result<crate::net::SessionStats> {
         let (doc, peer) = (doc.clone(), peer.to_owned());
         self.run(move |i| {
             Box::pin(async move {
                 let d = i.doc(&doc)?;
                 let key = parse_principal(&peer).ok_or_else(|| StoreError::Invalid("principal".into()))?;
-                let s = i.sync_once(&d, key).await.map_err(StoreError::Transport)?;
-                Ok((s.received_operations, s.sent_operations))
+                i.sync_once(&d, key).await.map_err(StoreError::Transport)
             })
         })
         .await
@@ -234,6 +233,19 @@ impl P2pStore {
         .await
     }
 
+    /// Timings of the blob fetches this node has made for `doc`.
+    pub async fn blob_fetches(&self, doc: &DocId) -> Result<Vec<crate::replica::BlobFetch>> {
+        let doc = doc.clone();
+        self.run(move |i| {
+            Box::pin(async move {
+                let d = i.doc(&doc)?;
+                let v = d.st.borrow().blob_fetches.clone();
+                Ok(v)
+            })
+        })
+        .await
+    }
+
     /// What a hostile member does: publish a version entry around every role check.
     pub async fn forge_version(&self, doc: &DocId, version: Version) -> Result<String> {
         let doc = doc.clone();
@@ -249,6 +261,31 @@ impl P2pStore {
     /// Fault injection: the next file stored is cut in half before it reaches the blob store.
     pub fn truncate_next_upload(&self) {
         self.truncate_next.store(true, Ordering::SeqCst);
+    }
+
+    /// The encoded headers of every operation of the document this node holds.
+    pub async fn raw_op_headers(&self, doc: &DocId) -> Result<Vec<Vec<u8>>> {
+        let doc = doc.clone();
+        self.run(move |i| {
+            Box::pin(async move {
+                let d = i.doc(&doc)?;
+                i.raw_op_headers(&d).await
+            })
+        })
+        .await
+    }
+
+    /// Get a blob from `peer` by hash alone, around every version entry (a test hook for what a
+    /// removed member could try). Returns the sealed bytes.
+    pub async fn fetch_raw_blob(&self, peer: &str, blake3_hex: &str) -> Result<Vec<u8>> {
+        let (peer, hex) = (peer.to_owned(), blake3_hex.to_owned());
+        self.run(move |i| {
+            Box::pin(async move {
+                let key = parse_principal(&peer).ok_or_else(|| StoreError::Invalid("principal".into()))?;
+                i.fetch_raw_blob(key, &hex).await
+            })
+        })
+        .await
     }
 
     /// The sealed bytes of a blob as this node holds them (what a provider would serve).

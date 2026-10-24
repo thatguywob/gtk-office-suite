@@ -226,7 +226,15 @@ pub struct SessionStats {
     pub sent_bytes: u32,
 }
 
-/// Run p2panda-sync's `LogSync` over one stream pair and return every operation the remote sent.
+/// What a session produced. A session that fails part way still returns the operations it had
+/// already received: each of them was decoded, and so signature-checked, one by one.
+pub struct SessionOutcome {
+    pub ops: Vec<Operation<DcpExt>>,
+    pub stats: Option<SessionStats>,
+    pub error: Option<String>,
+}
+
+/// Run p2panda-sync's `LogSync` over one stream pair and collect every operation the remote sent.
 ///
 /// `logs` names the (author, log) pairs this side offers; the protocol compares log heights with
 /// the remote's and sends what the remote lacks. The sender's stream is finished (not dropped) so
@@ -236,7 +244,7 @@ pub async fn run_session(
     logs: std::collections::BTreeMap<VerifyingKey, Vec<LogId>>,
     send: SendStream,
     recv: RecvStream,
-) -> Result<(Vec<Operation<DcpExt>>, SessionStats), String> {
+) -> SessionOutcome {
     type Evt = LogSyncEvent<DcpExt>;
     let (event_tx, mut event_rx) = broadcast::channel::<Evt>(1 << 17);
     let protocol = LogSync::<LogId, DcpExt, SqliteStore, Evt>::new(store.clone(), logs, event_tx);
@@ -247,30 +255,32 @@ pub async fn run_session(
     // Finish the send half before anything else so the remote reads our last message.
     let mut send = sink.into_inner();
     let _ = send.finish();
-    let (_dedup, metrics) = result.map_err(|e| e.to_string())?;
 
     let mut ops = Vec::new();
+    let mut error = None;
     loop {
         match event_rx.try_recv() {
             Ok(LogSyncEvent::OperationReceived { operation, .. }) => ops.push(*operation),
             Ok(_) => {}
             Err(broadcast::error::TryRecvError::Lagged(n)) => {
-                return Err(format!(
-                    "the session event buffer overflowed by {n} operations"
-                ))
+                error = Some(format!("the session event buffer overflowed by {n} operations"));
             }
             Err(_) => break,
         }
     }
-    Ok((
-        ops,
-        SessionStats {
+    let stats = match result {
+        Ok((_dedup, metrics)) => Some(SessionStats {
             received_operations: metrics.received_operations,
             received_bytes: metrics.received_bytes,
             sent_operations: metrics.sent_operations,
             sent_bytes: metrics.sent_bytes,
-        },
-    ))
+        }),
+        Err(e) => {
+            error = Some(e.to_string());
+            None
+        }
+    };
+    SessionOutcome { ops, stats, error }
 }
 
 pub fn node_id_of(key: &VerifyingKey) -> Result<EndpointId, String> {
