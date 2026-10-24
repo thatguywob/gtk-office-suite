@@ -869,6 +869,94 @@ async fn replaying_an_offset_is_idempotent_and_a_fresh_reader_agrees_with_an_inc
     assert_eq!(after, ours);
 }
 
+// ---------------------------------------------------------------- the server's own guarantees
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn concurrent_appends_are_all_kept_once_and_every_reader_sees_one_order() {
+    let base = require_streams!();
+    let http = Http::new(&base);
+    let path = format!("dcp/order-{}/s", hex::encode(crypto::random::<6>()));
+    http.create(&path, JSON, None, false).await.unwrap();
+    let mut joins = Vec::new();
+    for w in 0..8 {
+        let h = http.clone();
+        let p = path.clone();
+        joins.push(tokio::spawn(async move {
+            for i in 0..50 {
+                h.append(
+                    &p,
+                    JSON,
+                    format!("{{\"w\":{w},\"i\":{i}}}").into_bytes(),
+                    None,
+                    false,
+                )
+                .await
+                .unwrap();
+            }
+        }));
+    }
+    for j in joins {
+        j.await.unwrap();
+    }
+    let a = http.read_all(&path, START).await.unwrap().0;
+    let b = Http::new(&base).read_all(&path, START).await.unwrap().0;
+    assert_eq!(a.len(), 400, "no append was lost or doubled");
+    assert_eq!(a, b, "two readers see the same order");
+    // Each writer's own appends are in the order it sent them.
+    for w in 0..8 {
+        let mine: Vec<i64> = a
+            .iter()
+            .filter(|m| m["w"] == w)
+            .map(|m| m["i"].as_i64().unwrap())
+            .collect();
+        assert_eq!(mine, (0..50).collect::<Vec<_>>(), "writer {w}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn idempotent_producer_headers_deduplicate_a_retried_append_though_the_binding_does_not_need_them(
+) {
+    let base = require_streams!();
+    let http = Http::new(&base);
+    let path = format!("dcp/idem-{}/s", hex::encode(crypto::random::<6>()));
+    http.create(&path, JSON, None, false).await.unwrap();
+    let h = |seq: u64| {
+        vec![
+            ("producer-id", "writer-1".to_owned()),
+            ("producer-epoch", "0".to_owned()),
+            ("producer-seq", seq.to_string()),
+        ]
+    };
+    let first = http
+        .append_raw(&path, JSON, b"{\"n\":0}".to_vec(), &h(0))
+        .await
+        .unwrap();
+    let again = http
+        .append_raw(&path, JSON, b"{\"n\":0}".to_vec(), &h(0))
+        .await
+        .unwrap();
+    let next = http
+        .append_raw(&path, JSON, b"{\"n\":1}".to_vec(), &h(1))
+        .await
+        .unwrap();
+    println!(
+        "IDEMPOTENT PRODUCER statuses: first {} retry {} next {}",
+        first.0, again.0, next.0
+    );
+    assert_eq!(
+        http.read_all(&path, START).await.unwrap().0.len(),
+        2,
+        "the retry was stored once"
+    );
+    let gap = http
+        .append_raw(&path, JSON, b"{\"n\":9}".to_vec(), &h(9))
+        .await;
+    assert!(
+        matches!(gap, Err(HttpError::Conflict { .. })),
+        "a sequence gap is refused: {gap:?}"
+    );
+}
+
 // ---------------------------------------------------------------- lease
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1185,6 +1273,62 @@ async fn a_late_joiner_bootstraps_from_a_snapshot_and_reads_only_what_follows() 
     let mut want = truth.clone();
     want.extend_from_slice(&tail);
     assert_eq!(state.0, want);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_snapshot_hint_cannot_be_checked_by_the_server_so_the_reader_bounds_it() {
+    let base = require_streams!();
+    let http = Http::new(&base);
+    // What the server says to an offset past the tail (a measurement, whichever server this is).
+    let path = format!("dcp/hint-{}/s", hex::encode(crypto::random::<6>()));
+    http.create(&path, JSON, Some(b"[{\"a\":1},{\"a\":2}]".to_vec()), false)
+        .await
+        .unwrap();
+    let tail = http.head(&path).await.unwrap().next;
+    let beyond = "9999999999999999_9999999999999999";
+    let r = http.read_chunk(&path, beyond, true).await;
+    println!(
+        "HINT beyond the tail ({tail} -> {beyond}): {}",
+        match &r {
+            Ok(x) => format!("200 with {} items, next {}", x.items.len(), x.next),
+            Err(e) => format!("error: {e}"),
+        }
+    );
+    assert!(beyond > tail.as_str(), "offsets sort lexicographically");
+
+    // Through the binding: an editor publishes a covering version whose hint lies.
+    let rig = Rig::new(&base).await;
+    let mut w = StreamWriter::new(ALGORITHM, DOC_MODEL);
+    for i in 0..5 {
+        rig.editor
+            .publish_update(
+                &rig.doc,
+                w.next(&rig.first, format!("u{i}").as_bytes()).unwrap(),
+            )
+            .await
+            .unwrap();
+    }
+    let n = rig.epoch().await;
+    let st = rig.editor.http().clock.estimate().unwrap_or(0);
+    let mut inner = inner_version(&rig.first, &rig.editor.principal(), st);
+    inner["body"]["covers"] = serde_json::json!({"algorithm": ALGORITHM, "through": "x"});
+    inner["hint"] = serde_json::json!({"epoch": n, "offset": beyond});
+    assert!(rig
+        .editor
+        .send_unchecked(&rig.doc, Kind::Ver, &inner)
+        .await
+        .unwrap()
+        .is_some());
+    let late = store_at(&base, "LATE");
+    rig.owner
+        .grant(&rig.doc, &late.principal(), Role::Viewer)
+        .await
+        .unwrap();
+    let got = late.updates(&rig.doc).await.unwrap().len();
+    assert_eq!(
+        got, 5,
+        "a hint beyond the tail is ignored and the reader reads everything"
+    );
 }
 
 // ---------------------------------------------------------------- time

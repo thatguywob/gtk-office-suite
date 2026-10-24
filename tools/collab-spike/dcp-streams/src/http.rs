@@ -313,6 +313,39 @@ impl Http {
         Err(self.fail(resp).await)
     }
 
+    /// `POST` with arbitrary extra headers, answering the status as well. For
+    /// tests of protocol features the binding does not use (idempotent producers).
+    pub async fn append_raw(
+        &self,
+        path: &str,
+        content_type: &str,
+        body: Vec<u8>,
+        headers: &[(&str, String)],
+    ) -> Result<(u16, Appended), HttpError> {
+        let mut extra = vec![("content-type", content_type.to_owned())];
+        extra.extend(headers.iter().map(|(k, v)| (*k, v.clone())));
+        let resp = self
+            .send(
+                Method::POST,
+                path,
+                &[],
+                &extra,
+                Some(body),
+                Some(Duration::from_secs(300)),
+            )
+            .await?;
+        if resp.status().is_success() {
+            return Ok((
+                resp.status().as_u16(),
+                Appended {
+                    next: Self::hdr(&resp, "stream-next-offset").unwrap_or_default(),
+                    closed: Self::flag(&resp, "stream-closed"),
+                },
+            ));
+        }
+        Err(self.fail(resp).await)
+    }
+
     pub async fn head(&self, path: &str) -> Result<Head, HttpError> {
         let resp = self
             .send(

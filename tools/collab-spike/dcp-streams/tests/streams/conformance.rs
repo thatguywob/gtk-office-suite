@@ -8,9 +8,9 @@ use async_trait::async_trait;
 use dcp_conformance::{
     run_all, Capabilities, Failure, Faults, Fixture, Forger, RealTime, StoreFactory,
 };
-use dcp_core::{DocId, DocumentStore, Version};
+use dcp_core::{DocId, Version};
 use dcp_streams::wire::{Inner, Kind};
-use dcp_streams::StreamsStore;
+use dcp_streams::{Http, Identity, StreamsConfig, StreamsStore};
 
 use crate::common::*;
 use crate::require_streams;
@@ -18,6 +18,8 @@ use crate::require_streams;
 pub struct StreamsFactory {
     pub base: String,
     pub label: String,
+    /// Negative control: every handle accepts records whatever their author's role.
+    pub lenient: bool,
 }
 
 struct CutUploads(Arc<StreamsStore>);
@@ -75,9 +77,16 @@ impl StoreFactory for StreamsFactory {
     }
 
     async fn fresh(&self) -> Result<Fixture, Failure> {
-        let owner = store_at(&self.base, "OWNER-DEV");
-        let editor = store_at(&self.base, "EDITOR-DEV");
-        let viewer = store_at(&self.base, "VIEWER-DEV");
+        let mk = |device: &str| {
+            let mut cfg = StreamsConfig::new(device);
+            cfg.lenient_roles = self.lenient;
+            Arc::new(StreamsStore::new(
+                Http::new(&self.base),
+                Identity::generate(),
+                cfg,
+            ))
+        };
+        let (owner, editor, viewer) = (mk("OWNER-DEV"), mk("EDITOR-DEV"), mk("VIEWER-DEV"));
         // Each handle pins its own model of the server clock (a second each,
         // in parallel).
         let (a, b, c) = tokio::join!(owner.calibrate(), editor.calibrate(), viewer.calibrate());
@@ -105,12 +114,31 @@ async fn spec_section_12_journeys_on_a_durable_streams_server() {
     let factory = StreamsFactory {
         base,
         label: std::env::var("DCP_STREAMS_LABEL").unwrap_or_else(|_| "reference server".into()),
+        lenient: false,
     };
     let report = run_all(&factory).await;
     println!("{report}");
     report.assert_all_passed();
 }
 
-// Silence an unused-import warning when the macro path is the only user.
-#[allow(dead_code)]
-fn _uses(_: &dyn DocumentStore) {}
+/// Negative control: when no reader checks the role of an author (and the
+/// server, having no access control, accepts the viewer's forgery), the forged
+/// version becomes a head and the journey must fail. It proves the journey can
+/// fail, and that the readers' rule is what held in the run above.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_forged_version_journey_fails_when_no_reader_checks_roles() {
+    let base = require_streams!();
+    let factory = StreamsFactory {
+        base,
+        label: "readers do not check roles".into(),
+        lenient: true,
+    };
+    let result =
+        dcp_conformance::run_one(&factory, "forged_version_from_a_viewer_is_not_accepted").await;
+    println!("{result:?}");
+    assert!(
+        matches!(result.outcome, dcp_conformance::Outcome::Failed(_)),
+        "the negative control must fail: {:?}",
+        result.outcome
+    );
+}

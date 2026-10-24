@@ -191,7 +191,7 @@ jobs:
       - name: Measurements, Node reference server (release build of the client)
         env:
           DCP_MEASURE_OUT: ${{ github.workspace }}/streams-logs/measure-node.jsonl
-          DCP_MEASURE_MAX_MB: '256'
+          DCP_MEASURE_MAX_MB: '512'
         run: |
           set -euo pipefail
           eval "$(scripts/streams-up.sh node)"
@@ -202,7 +202,7 @@ jobs:
         if: ${{ !cancelled() }}
         env:
           DCP_MEASURE_OUT: ${{ github.workspace }}/streams-logs/measure-caddy.jsonl
-          DCP_MEASURE_MAX_MB: '256'
+          DCP_MEASURE_MAX_MB: '512'
         run: |
           set -euo pipefail
           eval "$(STREAMS_PORT=4438 scripts/streams-up.sh caddy)"

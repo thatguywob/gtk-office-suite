@@ -342,6 +342,68 @@ async fn catch_up_time_for_n_versions() {
     }
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore]
+async fn catch_up_across_many_epochs() {
+    let base = require_streams!();
+    let rig = Rig::new(&base).await;
+    let mut parent = rig.first.clone();
+    for i in 0..20 {
+        parent = rig
+            .editor
+            .publish_version(
+                &rig.doc,
+                vec![parent],
+                new_file(format!("v{i}").as_bytes()),
+                None,
+            )
+            .await
+            .unwrap()
+            .id;
+    }
+    let mut rows = Vec::new();
+    let mut have = 3usize;
+    for target in [10usize, 25, 50] {
+        while have < target {
+            rig.owner
+                .grant(&rig.doc, &store_at(&base, "m").principal(), Role::Viewer)
+                .await
+                .unwrap();
+            have += 1;
+        }
+        let mut v = Vec::new();
+        let mut cost = None;
+        for _ in 0..5 {
+            let s = Arc::new(StreamsStore::new(
+                Http::new(&base),
+                Identity::generate(),
+                StreamsConfig::new("COLD"),
+            ));
+            s.calibrate().await.unwrap();
+            rig.owner
+                .grant(&rig.doc, &s.principal(), Role::Viewer)
+                .await
+                .unwrap();
+            have += 1;
+            let before = s.http().snapshot();
+            let t = Instant::now();
+            let vs = s.versions(&rig.doc).await.unwrap();
+            let us = s.updates(&rig.doc).await.unwrap();
+            v.push(ms(t.elapsed()));
+            assert_eq!((vs.len(), us.len()), (21, 0));
+            let after = s.http().snapshot();
+            cost = Some(
+                json!({"requests": after.requests - before.requests, "bytes": after.bytes_received - before.bytes_received}),
+            );
+        }
+        rows.push(json!({"members_so_far": have, "epochs": have, "cold_reader_versions_plus_updates_ms": summary(v), "cost": cost}));
+    }
+    emit(
+        "catch_up_across_many_epochs (20 versions, no updates)",
+        json!({"rows": rows}),
+    );
+}
+
 // ------------------------------------------------------------------ overhead
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -459,7 +521,7 @@ async fn the_largest_record_and_file_the_server_accepts() {
     let cap = max_mb();
     let mut rows = Vec::new();
     // A JSON message of this many bytes (a string field), then a closed octet stream of the same size.
-    for mb in [1usize, 4, 16, 32, 64, 128, 256] {
+    for mb in [1usize, 4, 16, 32, 64, 128, 256, 512] {
         if mb > cap {
             break;
         }

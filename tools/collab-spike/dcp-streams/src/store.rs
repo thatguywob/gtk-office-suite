@@ -217,8 +217,17 @@ impl StreamsStore {
         let mut hinted = false;
         if at == START && self.cfg.use_snapshots {
             if let Some(h) = Self::snapshot_hint(c, idx) {
-                at = h;
-                hinted = true;
+                // Offsets sort lexicographically (protocol section 8), so a hint
+                // beyond the tail is a lie or a lost stream: read from the start.
+                // A hint that is inside the stream cannot be checked; it is
+                // trusted as far as the editor who wrote it.
+                match self.http.head(&path).await {
+                    Ok(head) if h <= head.next => {
+                        at = h;
+                        hinted = true;
+                    }
+                    _ => {}
+                }
             }
         }
         let got = match self.http.read_all(&path, &at).await {
