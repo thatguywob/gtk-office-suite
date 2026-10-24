@@ -20,7 +20,7 @@ getrandom = "0.3"
 httpdate = "1"
 parking_lot = "0.12"
 hex.workspace = true
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
 
 [dev-dependencies]
 dcp-conformance = { path = "../dcp-conformance" }
-axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "query", "json"] }
