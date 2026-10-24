@@ -29,7 +29,7 @@ from what the RFC hoped in six ways that matter. The load-bearing results:
    p2panda-core 0.7.1 refuses a header with any byte string over 512 bytes, which silently breaks
    its own spaces messages beyond about 500 bytes. What works: p2panda-core's signed logs,
    p2panda-sync's `LogSync` protocol, p2panda-auth's group CRDT, p2panda-encryption's group key
-   agreement, and iroh-blobs. The binding is those pieces plus about 2,400 lines of ours.
+   agreement, and iroh-blobs. The binding is those pieces plus about 3,300 lines of ours.
 3. **A removed member cannot decrypt what is published after the removal, but only if the publisher
    has applied the removal.** With the membership gate switched off, the removed member's node
    received the later operations and decrypted none of them. A member that had not yet seen the
@@ -78,7 +78,7 @@ allows one per resolution (first CI run, job `check`: "failed to select a versio
 `libsqlite3-sys`"). The parent `Cargo.toml` now has `exclude = ["dcp-p2p"]` and the crate has its own
 `Cargo.lock` (generated in CI; integration must commit it).
 
-**What the binding is** (`dcp-p2p`, ~2,400 lines of `src/`, ~1,100 of tests):
+**What the binding is** (`dcp-p2p`, 3,272 lines of `src/`, 1,206 of tests):
 
 - One `P2pStore` per principal. A principal is an Ed25519 key that is at the same time the iroh
   endpoint id (`SecretKey::from_bytes(signing_key.as_bytes())`), the p2panda author and the
@@ -131,7 +131,7 @@ no test here uses `DCP_SKIP_*`.
 | Storage | p2panda-store `SqliteStore` | Works; in-memory has one connection, so a transaction blocks every other query | One database per document; short transactions |
 | Log sync | p2panda-sync `LogSync` | Works (measured). One malformed header aborts the whole session | Own sessions, own membership gate, keeps the operations received before an abort |
 | Discovery, address book, gossip | p2panda-net | Passes its own e2e test; sync cannot be driven per peer or gated | Not used |
-| Blobs | **p2panda-blobs** | **An empty crate**: `src/lib.rs` is the `#![cfg_attr(docsrs, ...)]` line and `// TODO: Needs refactoring since p2panda-net refactor.`; 565 lines in unused modules | iroh-blobs 0.103.1 directly |
+| Blobs | **p2panda-blobs** | **An empty crate**: `src/lib.rs` is one `#![cfg_attr(docsrs, ...)]` line and `// TODO: Needs refactoring since p2panda-net refactor.`, with no `mod` declaration; the 560 other lines are files that nothing compiles | iroh-blobs 0.103.1 directly |
 | Group membership with levels | p2panda-auth | Four levels `Pull < Read < Write < Manage`, an operation DAG, a "strong removal" resolver | Used through p2panda-spaces |
 | Group encryption | p2panda-encryption | Works: key rotation on removal, a late member gets the history | Used through p2panda-spaces |
 | Both together | p2panda-spaces | See next list | The bulk of the work-arounds |
@@ -146,8 +146,9 @@ p2panda-spaces 0.7.1, with the evidence:
   operations, two key rotations) and refuses any operation that carries a promote, a demote or a
   `SpaceUpdate`.
 - **No author on decrypted data.** `Event::Application { space_id, data }` (`event.rs:54`) has no
-  operation id and no author, and a message received before the receiver was welcomed comes out later
-  as a by-product of processing a different message. The binding makes every entry carry its own
+  operation id and no author, and the encryption orderer queues a message received before the receiver
+  was welcomed (`orderer.rs`, `next_ready_message`), so its plaintext comes out later as a by-product
+  of processing a different message (*read, not run*). The binding makes every entry carry its own
   Ed25519 signature inside the encryption and takes the author from that (`signed.rs`).
 - **No authorisation of writes.** Any member holding the group key can encrypt anything. The reader
   rule in `auth_check.rs` is the binding's: an entry counts only if its author had at least the
@@ -471,7 +472,8 @@ exact bytes of the body with its Ed25519 key; the signed body is encrypted to th
 data scheme) and carried as an operation of the author's log. The entry id is the hex BLAKE3 hash of the
 body and is the version, lease or update identifier. A reader MUST verify the signature, that `doc`
 names the document, and that `created_by.principal` equals `author`. An operation's header MUST NOT
-hold a byte string longer than 512 bytes (p2panda-core refuses it); a message larger than that is split
+hold a byte string longer than 512 bytes (p2panda-core refuses it; its source applies the same limit to
+arrays, maps and text, which was not separately measured); a message larger than that is split
 into byte strings of at most 480 bytes, at most 500 of them.
 
 *Roles.* viewer = p2panda-auth `Read`, editor = `Write`, owner = `Manage`; `commenter` is not expressible.
