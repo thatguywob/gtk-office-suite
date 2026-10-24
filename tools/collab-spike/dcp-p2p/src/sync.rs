@@ -204,8 +204,25 @@ impl Inner {
         result
     }
 
+    /// Is `peer` someone this node may talk to about `doc` right now: a current member, or the
+    /// creator it joined through?
+    fn may_sync_with(&self, doc: &Doc, peer: &VerifyingKey) -> bool {
+        if !self.cfg.enforce_acl {
+            return true;
+        }
+        let st = doc.st.borrow();
+        st.members.iter().any(|(k, _)| k == peer) || st.sync_peers.contains(peer)
+    }
+
     async fn sync_inner(self: &Rc<Self>, doc: &Rc<Doc>, peer: VerifyingKey) -> Result<SessionStats, String> {
         let conn = self.connect(peer, SYNC_ALPN).await?;
+        // The decision to talk to `peer` may be older than this moment (the session was queued or
+        // was waiting for the connection): take the read lock, which a membership change holds
+        // exclusively until the new list has reached the gate, and decide again under it.
+        let guard = doc.serving.read().await;
+        if !self.may_sync_with(doc, &peer) {
+            return Err(format!("{} is no longer a member of {}", principal_of(&peer), doc.id));
+        }
         let (mut send, mut recv) = conn.open_bi().await.map_err(|e| e.to_string())?;
         write_hello(
             &mut send,
@@ -220,10 +237,8 @@ impl Inner {
             return Err(format!("{} refused to sync {}", principal_of(&peer), doc.id));
         }
         let logs = doc.logs(&self.me);
-        let out = {
-            let _r = doc.serving.read().await;
-            run_session(&doc.store, logs, send, recv).await
-        };
+        let out = run_session(&doc.store, logs, send, recv).await;
+        drop(guard);
         self.ingest(doc, out.ops).await.map_err(|e| e.to_string())?;
         match (out.stats, out.error) {
             (Some(stats), None) => {
