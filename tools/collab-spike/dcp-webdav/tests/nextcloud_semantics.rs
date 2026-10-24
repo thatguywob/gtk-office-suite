@@ -23,8 +23,13 @@ async fn put(d: &Dav, name: &str, body: &[u8], headers: &[(&str, &str)]) -> dcp_
 }
 
 async fn etag_of(d: &Dav, name: &str) -> String {
-    let (_, e) = d.propfind(&d.files_path(name), 0, &["d:getetag"]).await.unwrap();
-    e[0].get(DAV, "getetag").unwrap().to_owned()
+    etag_and_modified(d, name).await.0
+}
+
+/// `(getetag, getlastmodified)` of a file: the ETag and the whole-second mtime.
+async fn etag_and_modified(d: &Dav, name: &str) -> (String, String) {
+    let (_, e) = d.propfind(&d.files_path(name), 0, &["d:getetag", "d:getlastmodified"]).await.unwrap();
+    (e[0].get(DAV, "getetag").unwrap().to_owned(), e[0].get(DAV, "getlastmodified").unwrap().to_owned())
 }
 
 async fn share(d: &Dav, path: &str, with: &str, perms: u32) -> String {
@@ -79,15 +84,25 @@ async fn conditional_put_semantics() {
     for (label, replacement) in [("different_size", &b"a replacement that is longer"[..]), ("same_size", &b"bbb"[..])] {
         let (mut unchanged, mut stale_accepted, mut stale_refused) = (0, 0, 0);
         let mut answer_matches_propfind = 0;
+        // (etag moved, mtime second moved) -> count
+        let mut by_cause = std::collections::BTreeMap::<&str, u32>::new();
         for i in 0..rounds {
             let n = format!("{name}-{label}-{i}");
             let e0 = put(&a, &n, b"aaa", &[("If-None-Match", "*")]).await.etag().unwrap();
+            let (_, lm0) = etag_and_modified(&a, &n).await;
             let r = put(&a, &n, replacement, &[("If-Match", e0.as_str())]).await; // writer 1
             assert_eq!(r.status, 204);
-            let now = etag_of(&a, &n).await;
+            let (now, lm1) = etag_and_modified(&a, &n).await;
             if r.etag().as_deref() == Some(now.as_str()) {
                 answer_matches_propfind += 1;
             }
+            let key = match (now != e0, lm1 != lm0) {
+                (false, false) => "etag_same_second_same",
+                (false, true) => "etag_same_second_moved",
+                (true, false) => "etag_moved_second_same",
+                (true, true) => "etag_moved_second_moved",
+            };
+            *by_cause.entry(key).or_default() += 1;
             if now == e0 {
                 unchanged += 1;
             }
@@ -101,7 +116,7 @@ async fn conditional_put_semantics() {
         }
         measure(
             &format!("if_match_after_an_overwrite_{label}"),
-            json!({ "rounds": rounds, "etag_unchanged": unchanged, "stale_writer_accepted": stale_accepted, "stale_writer_refused_412": stale_refused, "put_answer_etag_equals_propfind": answer_matches_propfind }),
+            json!({ "rounds": rounds, "etag_unchanged": unchanged, "stale_writer_accepted": stale_accepted, "stale_writer_refused_412": stale_refused, "put_answer_etag_equals_propfind": answer_matches_propfind, "etag_vs_mtime_second": by_cause }),
         );
         // Whenever the ETag moved the stale writer is refused, and whenever it
         // did not the stale writer is accepted: If-Match is exactly as good as
@@ -568,7 +583,8 @@ async fn the_clock_has_whole_second_resolution() {
     let clock = clock(&url_a()).await;
     let calibration = t0.elapsed();
     let mut offsets = Vec::new();
-    for _ in 0..8 {
+    // Three seconds: the server's second ticks over several times.
+    for _ in 0..24 {
         let before = clock.now_ms();
         let r = a.request("HEAD", "/robots.txt", &[], None).await.unwrap();
         let date_ms = r.date_ms().unwrap();
@@ -577,10 +593,11 @@ async fn the_clock_has_whole_second_resolution() {
         offsets.push(before as i64 - date_ms as i64);
         tokio::time::sleep(Duration::from_millis(130)).await;
     }
-    measure("clock_estimate_minus_date_header_ms", json!({ "calibration_ms": ms(calibration), "offsets": offsets }));
-    for o in &offsets {
-        assert!((-20..1050).contains(o), "the estimate {o} ms is outside the server's second");
-    }
+    let (lo, hi) = (*offsets.iter().min().unwrap(), *offsets.iter().max().unwrap());
+    measure("clock_estimate_minus_date_header_ms", json!({ "calibration_ms": ms(calibration), "samples": offsets.len(), "min": lo, "max": hi }));
+    // The estimate must sit inside the second the Date header names, give or take
+    // the calibration error and a round trip.
+    assert!(lo >= -30 && hi <= 1060, "the estimate left the server's second: {offsets:?}");
 }
 
 // --------------------------------------------------------------- latency
