@@ -22,8 +22,9 @@
 //! * **`default-drained`** (`DCP_DRAIN_BURST=1` on the default profile): a
 //!   fresh user has Synapse's burst of 10 events, and one journey sends 3 to 8
 //!   events in all (measured), so on plain `default` nothing is ever delayed.
-//!   The drained profile spends each principal's burst before the document is
-//!   created ([`drain_message_budget`]: send into a scratch room until the first
+//!   The drained profile spends each principal's burst once the room is set
+//!   up and read, right before the check or journey starts
+//!   ([`drain_message_budget`]: send into a scratch room until the first
 //!   `M_LIMIT_EXCEEDED`), which is a user who has been editing for a while: from
 //!   then on every event costs about 5 s. That is where the limits bite.
 

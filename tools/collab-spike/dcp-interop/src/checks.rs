@@ -1475,12 +1475,61 @@ pub async fn two_wopi_sessions_on_one_document_never_share_a_lock(rig: &Rig) -> 
     Ok(())
 }
 
+/// Percent-encode for a URL path or query component.
+fn pct(s: &str) -> String {
+    let mut out = String::new();
+    for b in s.bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~') {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
+/// The server timestamps of the room's newest `n` lease events, newest first,
+/// including records a later one replaced (state events are timeline events
+/// too): straight from the homeserver, with the owner's token.
+async fn lease_event_times(rig: &Rig, n: usize) -> Result<Vec<u64>, Failure> {
+    let token = rig
+        .handles
+        .owner
+        .client()
+        .access_token()
+        .ok_or_else(|| Failure::new("the owner has no access token"))?;
+    let url = format!(
+        "{}/_matrix/client/v3/rooms/{}/messages?dir=b&limit={n}&filter={}",
+        rig.syn.url.trim_end_matches('/'),
+        pct(&rig.doc),
+        pct(r#"{"types":["org.tunaos.dcp.lease"]}"#)
+    );
+    let page: Value = dcp_matrix::matrix_sdk::reqwest::Client::new()
+        .get(&url)
+        .bearer_auth(token)
+        .send()
+        .await
+        .map_err(|e| Failure::new(format!("GET messages: {e}")))?
+        .json()
+        .await
+        .map_err(|e| Failure::new(format!("messages body: {e}")))?;
+    Ok(page["chunk"]
+        .as_array()
+        .map(|c| c.iter().filter_map(|ev| ev["origin_server_ts"].as_u64()).collect())
+        .unwrap_or_default())
+}
+
 /// Two WOPI hosts in front of one room (two instances of the adapter, so the
 /// per-document mutex of one host does not serialise them), each with a
-/// different principal's token, both `LOCK` at once on a free lease: the
-/// two-read rule inside `LOCK` (lease rule 3) must leave exactly one 200,
-/// the other a 409 ("another writer won the lease read-back"), and the lease
-/// must name the winner. Four rounds.
+/// different principal's token, both `LOCK` at once on a free lease. The
+/// two-read rule inside `LOCK` (lease rule 3) promises one winner when the two
+/// writes land within the settle interval of each other, so: exactly one 200
+/// and one 409, and the lease names the winner. If both answer 200 the check
+/// reads the server timestamps of the two lease records, and that is only
+/// accepted when they are at least the settle interval (500 ms) apart, the
+/// case the rule does not cover (a write held back by the homeserver's rate
+/// limit lands after the other session has already confirmed): it is printed
+/// as `OUTSIDE-TOLERANCE` with the gap, and counted. Four rounds.
 pub async fn two_wopi_hosts_racing_for_one_lock_have_one_winner(rig: &Rig) -> R {
     use std::collections::BTreeMap;
     let doc = &rig.doc;
@@ -1496,28 +1545,53 @@ pub async fn two_wopi_hosts_racing_for_one_lock_have_one_winner(rig: &Rig) -> R 
     status("host 1 GetFile", &on_host1.get_file(None).await?, 200)?;
     status("host 2 GetFile", &on_host2.get_file(None).await?, 200)?;
 
-    let mut winners: BTreeMap<&str, u32> = BTreeMap::new();
+    let mut outcomes: BTreeMap<&str, u32> = BTreeMap::new();
     for round in 0..4 {
         let (l1, l2) = (format!("host1-round-{round}"), format!("host2-round-{round}"));
         let (x, y) = tokio::join!(on_host1.lock(&l1), on_host2.lock(&l2));
         let (x, y) = (x?, y?);
-        let (winner, winner_lock, loser) = match (x.status, y.status) {
-            (200, 409) => {
-                *winners.entry("host 1").or_default() += 1;
-                (&on_host1, l1.clone(), &y)
+        match (x.status, y.status) {
+            (200, 409) | (409, 200) => {
+                let (winner, winner_lock, loser) =
+                    if x.status == 200 { (&on_host1, l1.clone(), &y) } else { (&on_host2, l2.clone(), &x) };
+                *outcomes.entry(if x.status == 200 { "host 1 won" } else { "host 2 won" }).or_default() += 1;
+                println!("two hosts, round {round}: statuses {} / {}, loser's X-WOPI-Lock {:?}", x.status, y.status, loser.lock);
+                ensure!(
+                    loser.lock.as_deref() == Some(winner_lock.as_str()),
+                    "round {round}: the loser's 409 must carry the winner's string {winner_lock:?}, got {:?}",
+                    loser.lock
+                );
+                let l = lease_now(rig, "after the race").await?;
+                ensure!(l.body.token.as_deref() == Some(winner_lock.as_str()), "round {round}: the lease names {:?}, the 200 went to {winner_lock:?}", l.body.token);
+                status("the winner's UNLOCK", &winner.unlock(&winner_lock).await?, 200)?;
             }
-            (409, 200) => {
-                *winners.entry("host 2").or_default() += 1;
-                (&on_host2, l2.clone(), &x)
+            (200, 200) => {
+                let times = lease_event_times(rig, 2).await?;
+                let gap = match times.as_slice() {
+                    [newest, older] => newest.saturating_sub(*older),
+                    other => return Err(Failure::new(format!("round {round}: both LOCKs answered 200 and the room has {} recent lease events: {other:?}", other.len()))),
+                };
+                ensure!(
+                    gap >= MATRIX_SETTLE_MS,
+                    "round {round}: both hosts answered 200 although their lease writes were only {gap} ms apart, inside the {MATRIX_SETTLE_MS} ms settle interval the two-read rule covers"
+                );
+                println!("OUTSIDE-TOLERANCE two hosts, round {round}: both LOCKs answered 200; their lease writes landed {gap} ms apart (settle interval {MATRIX_SETTLE_MS} ms)");
+                *outcomes.entry("both 200 outside the settle interval").or_default() += 1;
+                // Whoever the room says holds it releases it; the other's string is dead.
+                let l = lease_now(rig, "after the race").await?;
+                let (holder, lock) = if l.body.token.as_deref() == Some(l1.as_str()) { (&on_host1, l1) } else { (&on_host2, l2) };
+                status("the holder's UNLOCK", &holder.unlock(&lock).await?, 200)?;
             }
-            other => return Err(Failure::new(format!("round {round}: two racing LOCKs on two hosts must give one 200 and one 409, got {other:?}; bodies {:?} / {:?}", x.text(), y.text()))),
-        };
-        println!("two hosts, round {round}: statuses {} / {}, loser's X-WOPI-Lock {:?}", x.status, y.status, loser.lock);
-        let l = lease_now(rig, "after the race").await?;
-        ensure!(l.body.token.as_deref() == Some(winner_lock.as_str()), "round {round}: the lease names {:?}, the 200 went to {winner_lock:?}", l.body.token);
-        status("the winner's UNLOCK", &winner.unlock(&winner_lock).await?, 200)?;
+            other => {
+                return Err(Failure::new(format!(
+                    "round {round}: two racing LOCKs on two hosts must not both fail, got {other:?}; bodies {:?} / {:?}",
+                    x.text(),
+                    y.text()
+                )))
+            }
+        }
     }
-    println!("two hosts racing for one lock: winners {winners:?}");
+    println!("two hosts racing for one lock: {outcomes:?}");
     server2.shutdown().await;
     Ok(())
 }

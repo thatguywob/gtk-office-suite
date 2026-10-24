@@ -226,16 +226,6 @@ impl Rig {
             editor: Arc::new(mk("editor").await),
             viewer: Arc::new(mk("viewer").await),
         };
-        // The drained profile: every principal starts with its message budget
-        // spent, so every event the rig and the check send is paced by the
-        // homeserver (DCP_DRAIN_BURST=1, default Synapse only).
-        if profile::drained(syn) {
-            for who in Who::ALL {
-                let sent = profile::drain_message_budget(handles.get(who)).await?;
-                println!("drained {who:?}'s message budget after {sent} events");
-            }
-        }
-
         let first_bytes = opts.first_file.map_or_else(|| BASE_FILE.to_vec(), |f| f());
         let doc = handles.owner.create_document(&standard_meta(), Some(new_file(&first_bytes))).await?;
         handles.owner.grant(&doc, &handles.editor.principal(), Role::Editor).await?;
@@ -283,6 +273,21 @@ impl Rig {
         for who in [Who::Editor, Who::Viewer] {
             let first = rig.first.clone();
             rig.wait_head(who, &first).await?;
+        }
+        // The drained profile (DCP_DRAIN_BURST=1, default Synapse only): the
+        // room exists and everyone has read it; now every principal's message
+        // budget is spent, together, so the first event of the check or the
+        // journey, from anyone, is already paced by the homeserver. (Draining
+        // before the setup would let the editor's and the viewer's buckets
+        // refill while the owner builds the room.)
+        if profile::drained(syn) {
+            let h = &rig.handles;
+            let (a, b, c) = tokio::join!(
+                profile::drain_message_budget(&h.owner),
+                profile::drain_message_budget(&h.editor),
+                profile::drain_message_budget(&h.viewer)
+            );
+            println!("drained the message budgets after {} / {} / {} events (owner / editor / viewer)", a?, b?, c?);
         }
         Ok(rig)
     }
