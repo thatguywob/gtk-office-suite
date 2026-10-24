@@ -332,6 +332,33 @@ async fn a_removed_editor_cannot_publish_with_a_stale_view() {
     assert!(entries_after > entries_before, "the entry must have been decrypted and refused, not lost");
 }
 
+/// The honest limit of revocation without a server: the rotated group key reaches a member only
+/// when it applies the removal. A member that has not seen the removal still encrypts to the old
+/// key, still serves the removed member, and the removed member reads what it published.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn content_from_a_member_that_has_not_seen_the_removal_is_readable_by_the_removed_member() {
+    init_logging();
+    let (owner, editor, viewer, doc) = default_trio().await;
+    let first = first_version(&owner, &doc).await;
+    editor.set_online(false).await.unwrap();
+    let t = Instant::now();
+    owner.revoke(&doc, &viewer.principal()).await.unwrap();
+    eprintln!("MEASURE revoke with the only other member unreachable returned after {} ms", t.elapsed().as_millis());
+    // The editor does not know. It publishes to the old group key.
+    let secret = b"published by a member who had not seen the removal";
+    let stale = editor.publish_version(&doc, vec![first], new_file(secret), None).await.unwrap();
+    // The owner, the only one who knows, goes away before the editor returns.
+    owner.set_online(false).await.unwrap();
+    editor.set_online(true).await.unwrap();
+    wait_for("the removed viewer lists the new version", Duration::from_secs(30), || async {
+        viewer.versions(&doc).await.ok()?.iter().any(|v| v.id == stale.id).then_some(())
+    })
+    .await;
+    let v = viewer.versions(&doc).await.unwrap().into_iter().find(|v| v.id == stale.id).unwrap();
+    assert_eq!(viewer.fetch_file(&doc, &v).await.unwrap(), secret);
+    eprintln!("MEASURE removed member read a version published after its removal by a member that had not applied it: yes");
+}
+
 // ------------------------------------------------------------------- the contact card
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
