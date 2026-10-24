@@ -176,3 +176,87 @@ jobs:
           name: spike-c-measure
           path: results/
           if-no-files-found: warn
+
+  relay:
+    name: sync through an in-process iroh relay
+    needs: check
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    continue-on-error: true
+    defaults:
+      run:
+        working-directory: tools/collab-spike/dcp-p2p
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          workspaces: tools/collab-spike/dcp-p2p
+          shared-key: collab-spike-c-relay
+      - name: Relay test
+        run: |
+          set -o pipefail
+          mkdir -p "$GITHUB_WORKSPACE/results"
+          cargo test --features relay-test --test relay -- --nocapture 2>&1 | tee "$GITHUB_WORKSPACE/results/relay.log"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        if: always()
+        with:
+          name: spike-c-relay
+          path: results/
+          if-no-files-found: warn
+
+  flatpak:
+    name: the same nodes inside a Flatpak build sandbox, with and without network
+    needs: test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    continue-on-error: true
+    defaults:
+      run:
+        working-directory: tools/collab-spike/dcp-p2p
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          workspaces: tools/collab-spike/dcp-p2p
+          shared-key: collab-spike-c-test
+      - name: Flatpak and the GNOME-style runtime
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/results"
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq flatpak
+          # Ubuntu 24.04 restricts unprivileged user namespaces, which bwrap needs.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          flatpak --version | tee "$GITHUB_WORKSPACE/results/flatpak.txt"
+          flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+          flatpak install --user -y --noninteractive flathub org.freedesktop.Platform//24.08 org.freedesktop.Sdk//24.08
+      - name: Build the test binary
+        run: |
+          set -euo pipefail
+          BIN=$(cargo test --test p2p --no-run --message-format=json 2>/dev/null | jq -r 'select(.profile.test==true and .target.name=="p2p") | .executable' | tail -1)
+          mkdir -p "$RUNNER_TEMP/bin" && cp "$BIN" "$RUNNER_TEMP/bin/p2p"
+          ls -l "$RUNNER_TEMP/bin"
+      - name: Run it inside the sandbox
+        run: |
+          set -uo pipefail
+          flatpak build-init "$RUNNER_TEMP/app" org.tunaos.P2pProbe org.freedesktop.Sdk org.freedesktop.Platform 24.08
+          run() { # run <label> <flatpak build options...>
+            label=$1; shift
+            echo "=== $label" | tee -a "$GITHUB_WORKSPACE/results/flatpak.txt"
+            flatpak build "$@" --filesystem="$RUNNER_TEMP/bin" "$RUNNER_TEMP/app" sh -c 'echo "-- interfaces seen by the sandbox:"; cat /proc/net/dev | tail -n +3 | cut -d: -f1; echo "-- test:"; '"$RUNNER_TEMP"'/bin/p2p a_peer_offline_during_publishes_catches_up_on_reconnect --nocapture --test-threads=1 2>&1 | tail -15' 2>&1 | tee -a "$GITHUB_WORKSPACE/results/flatpak.txt"
+          }
+          run "--unshare=network (no network permission)" --unshare=network
+          run "--share=network" --share=network
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        if: always()
+        with:
+          name: spike-c-flatpak
+          path: results/
+          if-no-files-found: warn

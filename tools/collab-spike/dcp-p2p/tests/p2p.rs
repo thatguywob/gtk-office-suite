@@ -306,6 +306,7 @@ async fn a_removed_editor_cannot_publish_with_a_stale_view() {
     init_logging();
     let (owner, editor, viewer, doc) = trio(acl_off(), acl_off(), acl_off()).await;
     let first = first_version(&owner, &doc).await;
+    let entries_before = owner.entry_count(&doc).await.unwrap();
     // The editor goes away just before it is removed, so it never learns of the removal.
     editor.set_online(false).await.unwrap();
     owner.revoke(&doc, &editor.principal()).await.unwrap();
@@ -321,8 +322,12 @@ async fn a_removed_editor_cannot_publish_with_a_stale_view() {
         let listed = n.versions(&doc).await.map(|v| v.iter().any(|x| x.id == stale.id)).unwrap_or(false);
         assert!(!listed, "{} lists a version written by a removed editor", n.principal());
     }
+    // The owner DID decrypt the entry (it still holds the old group key) and then refused it: the
+    // refusal is the reader's authorisation rule, not a failure to decrypt.
+    let entries_after = owner.entry_count(&doc).await.unwrap();
     let counters = owner.counters(&doc).await.unwrap();
-    eprintln!("MEASURE removed editor's entry dropped by the owner; owner counters {counters:?}");
+    eprintln!("MEASURE removed editor's entry: owner entries {entries_before} -> {entries_after}, listed: no; owner counters {counters:?}");
+    assert!(entries_after > entries_before, "the entry must have been decrypted and refused, not lost");
 }
 
 // ------------------------------------------------------------------- the contact card

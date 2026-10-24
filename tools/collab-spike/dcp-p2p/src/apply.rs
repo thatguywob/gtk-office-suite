@@ -17,17 +17,26 @@ use crate::replica::{tr, Doc, Entry, Inner};
 use crate::signed;
 
 impl Inner {
-    async fn store_op(&self, doc: &Doc, op: &Operation<DcpExt>) -> Result<bool, StoreError> {
+    /// Store a batch of operations in ONE transaction, with the document's sessions held off, so
+    /// that a peer asking this node for operations sees all of the batch or none of it.
+    async fn store_ops(&self, doc: &Doc, ops: &[Operation<DcpExt>]) -> Result<(), StoreError> {
+        if ops.is_empty() {
+            return Ok(());
+        }
+        let _w = doc.serving.write().await;
         let permit = doc.store.begin().await.map_err(tr)?;
-        let r = doc.store.insert_operation(&op.hash, op, &doc.id).await;
-        match r {
-            Ok(b) => {
-                doc.store.commit(permit).await.map_err(tr)?;
-                Ok(b)
+        let mut result = Ok(());
+        for op in ops {
+            if let Err(e) = doc.store.insert_operation(&op.hash, op, &doc.id).await {
+                result = Err(tr(e));
+                break;
             }
+        }
+        match result {
+            Ok(()) => doc.store.commit(permit).await.map_err(tr),
             Err(e) => {
                 let _ = doc.store.rollback(permit).await;
-                Err(tr(e))
+                Err(e)
             }
         }
     }
@@ -39,6 +48,7 @@ impl Inner {
         ops: Vec<Operation<DcpExt>>,
     ) -> Result<(), StoreError> {
         let _guard = doc.lock.lock().await;
+        let mut fresh: Vec<Operation<DcpExt>> = Vec::new();
         for op in ops {
             doc.st.borrow_mut().counters.ops_received += 1;
             if validate_operation(&op).is_err() {
@@ -48,15 +58,23 @@ impl Inner {
             let h = op.hash;
             {
                 let st = doc.st.borrow();
-                if st.applied.contains(&h) || st.pending.contains_key(&h) || st.rejected.contains_key(&h)
+                if st.applied.contains(&h)
+                    || st.pending.contains_key(&h)
+                    || st.rejected.contains_key(&h)
+                    || fresh.iter().any(|o| o.hash == h)
                 {
                     continue;
                 }
             }
-            self.store_op(doc, &op).await?;
+            fresh.push(op);
+        }
+        self.store_ops(doc, &fresh).await?;
+        {
             let mut st = doc.st.borrow_mut();
-            st.authors.insert(op.header.verifying_key);
-            st.pending.insert(h, op);
+            for op in fresh {
+                st.authors.insert(op.header.verifying_key);
+                st.pending.insert(op.hash, op);
+            }
         }
         self.drain_locked(doc).await
     }

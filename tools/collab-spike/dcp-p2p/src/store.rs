@@ -65,9 +65,16 @@ impl P2pStore {
                             while let Some(job) = job_rx.recv().await {
                                 tokio::task::spawn_local(job(inner.clone()));
                             }
+                            // Every handle is gone: close the network and the databases here,
+                            // where the runtime that owns them is still running.
+                            inner.shutdown().await;
                         }
                     }
                 });
+                // Dropping the tasks that still hold the node needs a runtime context (sqlx's
+                // pool returns its connections with a spawn).
+                let _enter = rt.enter();
+                drop(local);
             })
             .map_err(tr)?;
         let (principal, device, addr, truncate_next) = ready_rx
@@ -261,6 +268,18 @@ impl P2pStore {
     /// Fault injection: the next file stored is cut in half before it reaches the blob store.
     pub fn truncate_next_upload(&self) {
         self.truncate_next.store(true, Ordering::SeqCst);
+    }
+
+    /// Size of the persisted p2panda-spaces state (CBOR bytes).
+    pub async fn space_state_bytes(&self, doc: &DocId) -> Result<usize> {
+        let doc = doc.clone();
+        self.run(move |i| {
+            Box::pin(async move {
+                let d = i.doc(&doc)?;
+                i.space_state_bytes(&d).await
+            })
+        })
+        .await
     }
 
     /// The encoded headers of every operation of the document this node holds.

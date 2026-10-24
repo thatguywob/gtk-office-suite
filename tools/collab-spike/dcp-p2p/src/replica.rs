@@ -12,7 +12,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
-use dcp_core::{Meta, Role, StoreError};
+use dcp_core::{Role, StoreError};
 use iroh::endpoint::Connection;
 use iroh::EndpointAddr;
 use p2panda_auth::group::GroupCrdtState;
@@ -23,7 +23,7 @@ use p2panda_encryption::Rng;
 use p2panda_spaces::manager::Manager;
 use p2panda_spaces::space::SpacesState;
 use p2panda_spaces::{
-    AuthMessage, Credentials, SpacesArgs, SpacesStoreState, StrongRemoveResolver,
+    AuthMessage, Credentials, SpacesStoreState, StrongRemoveResolver,
 };
 use p2panda_store::groups::GroupsStore;
 use p2panda_store::spaces::{SpacesStore, SqliteSpacesStore};
@@ -152,6 +152,10 @@ pub struct Doc {
     pub forge: DcpForge,
     pub manager: DcpManager,
     pub lock: tokio::sync::Mutex<()>,
+    /// Sessions that read this document's log hold it shared; a writer that must make several
+    /// operations visible together (a role change is a removal and an addition) holds it exclusive
+    /// while it creates them, and so does the receiver while it stores a batch.
+    pub serving: tokio::sync::RwLock<()>,
     pub st: RefCell<DocState>,
 }
 
@@ -344,6 +348,15 @@ impl Inner {
         self.cfg.clock.now_ms()
     }
 
+    /// Stop the network and drop every document, inside the runtime that owns them.
+    pub async fn shutdown(&self) {
+        self.online.set(false);
+        self.acl.set_online(false);
+        self.conns.borrow_mut().clear();
+        let _ = self.net.router.shutdown().await;
+        self.docs.borrow_mut().clear();
+    }
+
     pub fn doc(&self, id: &str) -> Result<Rc<Doc>, StoreError> {
         self.docs
             .borrow()
@@ -378,6 +391,7 @@ impl Inner {
             forge,
             manager,
             lock: tokio::sync::Mutex::new(()),
+            serving: tokio::sync::RwLock::new(()),
             st: RefCell::new(DocState::default()),
         });
         doc.st.borrow_mut().authors.insert(self.me);

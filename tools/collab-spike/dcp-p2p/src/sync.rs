@@ -133,7 +133,10 @@ impl Inner {
         }
         write_status(&mut send, STATUS_OK).await?;
         let logs = doc.logs(&self.me);
-        let out = run_session(&doc.store, logs, send, recv).await;
+        let out = {
+            let _r = doc.serving.read().await;
+            run_session(&doc.store, logs, send, recv).await
+        };
         let got = out.ops.len();
         self.ingest(&doc, out.ops).await.map_err(|e| e.to_string())?;
         if got > 0 {
@@ -212,7 +215,10 @@ impl Inner {
             return Err(format!("{} refused to sync {}", principal_of(&peer), doc.id));
         }
         let logs = doc.logs(&self.me);
-        let out = run_session(&doc.store, logs, send, recv).await;
+        let out = {
+            let _r = doc.serving.read().await;
+            run_session(&doc.store, logs, send, recv).await
+        };
         self.ingest(doc, out.ops).await.map_err(|e| e.to_string())?;
         match (out.stats, out.error) {
             (Some(stats), None) => {

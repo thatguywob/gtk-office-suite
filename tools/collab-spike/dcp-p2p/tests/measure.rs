@@ -100,6 +100,11 @@ async fn convergence_of_n_entries() {
         let headers = a.raw_op_headers(&doc).await.unwrap();
         let bytes: usize = headers.iter().map(|h| h.len()).sum();
         eprintln!(
+            "MEASURE n={n}: persisted p2panda-spaces state {} bytes at the writer, {} bytes at the reader",
+            a.space_state_bytes(&doc).await.unwrap(),
+            b.space_state_bytes(&doc).await.unwrap()
+        );
+        eprintln!(
             "MEASURE n={n}: publish {publish_ms} ms ({} ms per entry at the writer), reader complete {} after {lag} ms past the last publish; {} operations stored, {} header bytes in total = {} bytes per operation (payload 100 bytes)",
             publish_ms as f64 / n as f64,
             if seen.is_some() { "yes" } else { "NO (timeout)" },
@@ -190,4 +195,33 @@ async fn blob_transfer_1_and_32_mib() {
             (big.bytes as f64 / 1048576.0) / secs
         );
     }
+}
+
+/// How long a lease write takes to show at another node: what the settle interval of lease rule 3
+/// has to cover on this binding (the anti-entropy interval is 200 ms; a write triggers a push).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore]
+async fn lease_propagation_latency() {
+    let (a, b, doc) = pair().await;
+    let base = a.versions(&doc).await.unwrap().remove(0).id;
+    let mut lat = Vec::new();
+    for i in 0..60u64 {
+        let claim = dcp_core::lease::Claim::new(a.principal(), format!("s{i}"), "t", &base, 60_000);
+        let lease = claim.lease_over(None);
+        let t = Instant::now();
+        let w = a.write_lease(&doc, lease).await.unwrap();
+        wait_for("b sees the lease", Duration::from_secs(10), || async {
+            (b.lease(&doc).await.ok()??.id == w.id).then_some(())
+        })
+        .await;
+        lat.push(t.elapsed().as_micros());
+    }
+    lat.sort_unstable();
+    eprintln!(
+        "MEASURE lease write -> visible at the other node over 60 writes: min {} us, median {} us, p95 {} us, max {} us",
+        lat[0],
+        lat[lat.len() / 2],
+        lat[lat.len() * 95 / 100],
+        lat[lat.len() - 1]
+    );
 }

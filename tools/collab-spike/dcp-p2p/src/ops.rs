@@ -166,6 +166,8 @@ impl Inner {
         match doc.level_of(&target) {
             Some(l) if l == access.level => Ok(()),
             Some(_) => {
+                // Both operations become visible to sessions together.
+                let _both = doc.serving.write().await;
                 // p2panda-auth has promote and demote, but p2panda-spaces 0.7.1 panics when a
                 // space processes either (`unimplemented!()` in `encryption/message.rs`), so a
                 // role change is a removal followed by an addition: the group key rotates twice.
@@ -424,11 +426,20 @@ impl Inner {
     ) -> Result<String, StoreError> {
         let _g = doc.lock.lock().await;
         let blob = blob_of_locator(&version.file.locator).unwrap_or_default();
-        let env = Envelope::Version {
-            version,
-            blob,
-            key: hex::encode([0u8; 32]),
-        };
+        // The hostile member holds the group key, so it can read the file key of the version it
+        // copies; with the right key the only thing standing between the forgery and a reader is
+        // the authorisation rule.
+        let key = doc
+            .st
+            .borrow()
+            .entries
+            .iter()
+            .find_map(|e| match &e.env {
+                Envelope::Version { blob: b, key, .. } if *b == blob => Some(key.clone()),
+                _ => None,
+            })
+            .unwrap_or_else(|| hex::encode([0u8; 32]));
+        let env = Envelope::Version { version, blob, key };
         let (id, _) = self.publish_entry(doc, env, false).await?;
         Ok(id)
     }
@@ -735,5 +746,13 @@ impl Inner {
         self.net.blobs.remote().fetch(conn, hash).await.map_err(tr)?;
         let b = self.net.blobs.get_bytes(hash).await.map_err(tr)?;
         Ok(b.to_vec())
+    }
+
+    /// Size in bytes of the persisted p2panda-spaces state of the document (CBOR), which
+    /// p2panda-spaces 0.7.1 reads and writes in full for every message.
+    pub async fn space_state_bytes(&self, doc: &Rc<Doc>) -> Result<usize, StoreError> {
+        let st = doc.space_state().await?;
+        let bytes = p2panda_core::cbor::encode_cbor(&*st).map_err(tr)?;
+        Ok(bytes.len())
     }
 }
