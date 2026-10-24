@@ -114,6 +114,24 @@ impl RawWopi {
         self.lock_op("UNLOCK", lock).await
     }
 
+    /// `REFRESH_LOCK`: Collabora never sends it (it refreshes with `LOCK` and
+    /// the same string), other WOPI clients do.
+    pub async fn refresh_lock(&self, lock: &str) -> Result<Resp, Failure> {
+        self.lock_op("REFRESH_LOCK", lock).await
+    }
+
+    /// `UNLOCK_AND_RELOCK`: `LOCK` carrying `X-WOPI-OldLock`.
+    pub async fn unlock_and_relock(&self, new_lock: &str, old_lock: &str) -> Result<Resp, Failure> {
+        self.send(
+            Method::POST,
+            false,
+            &[],
+            &[("X-WOPI-Override", "LOCK"), ("X-WOPI-Lock", new_lock), ("X-WOPI-OldLock", old_lock)],
+            None,
+        )
+        .await
+    }
+
     pub async fn get_lock(&self) -> Result<Resp, Failure> {
         self.send(Method::POST, false, &[], &[("X-WOPI-Override", "GET_LOCK")], None).await
     }
