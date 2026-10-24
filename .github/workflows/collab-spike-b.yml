@@ -1,0 +1,222 @@
+name: collab-spike-b
+
+# RFC-0004 Spike B: the Durable Streams binding (tools/collab-spike/dcp-streams)
+# against real Durable Streams servers:
+#
+#   node       the Node reference server, @durable-streams/server pinned in
+#              tools/collab-spike/scripts/streams-server/package-lock.json
+#   caddy      the Go server, release v0.3.0 (sha256 pinned in
+#              scripts/streams-caddy-fetch.sh), no access control
+#   caddy-auth the same behind Caddy's basic_auth (reader may GET, writer may write)
+#
+# Runs on the spike branch only (a spike's workflow is not part of the product CI).
+# A test that needs a server FAILS when none is configured; only DCP_SKIP_STREAMS=1
+# (or DCP_SKIP_STREAMS_AUTH=1) skips it, and the test says so.
+#
+# Measurements (docs/rfc/0004-spike-b-results.md) run when workflow_dispatch asks,
+# or when the head commit message contains "[measure]" (a workflow can only be
+# dispatched once it is on the default branch, so on a spike branch the commit
+# message is the switch).
+on:
+  push:
+    branches: [spike/collab-b]
+    paths:
+      - 'tools/collab-spike/**'
+      - 'docs/collab-spec/**'
+      - '.github/workflows/collab-spike-b.yml'
+  workflow_dispatch:
+    inputs:
+      measure:
+        description: 'Also run the spike-B measurements'
+        type: boolean
+        default: false
+
+concurrency:
+  group: collab-spike-b-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  CARGO_PROFILE_TEST_DEBUG: line-tables-only
+  CARGO_INCREMENTAL: 0
+  # The one test that needs a server with access control has its own step below.
+  DCP_SKIP_STREAMS_AUTH: '1'
+
+permissions:
+  contents: read
+
+jobs:
+  streams:
+    name: dcp-streams against Durable Streams servers
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    defaults:
+      run:
+        working-directory: tools/collab-spike
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          workspaces: tools/collab-spike
+          shared-key: collab-spike-b
+
+      - name: Output directory
+        run: mkdir -p "$GITHUB_WORKSPACE/streams-logs"
+
+      - name: Versions
+        run: |
+          rustc --version
+          cargo --version
+          node --version
+          npm --version
+          uname -a
+          nproc
+          free -m
+
+      - name: Install the pinned reference server (npm ci)
+        working-directory: tools/collab-spike/scripts/streams-server
+        run: |
+          npm ci --no-audit --no-fund
+          node -e 'console.log("@durable-streams/server", require("./node_modules/@durable-streams/server/package.json").version, "client", require("./node_modules/@durable-streams/client/package.json").version)'
+
+      - name: Build tests
+        run: cargo test -p dcp-streams --no-run
+
+      # A test that needs a server must fail without one, and skip only when told to, saying so.
+      - name: Fails loudly without a server
+        run: |
+          if env -u DCP_STREAMS_URL -u DCP_SKIP_STREAMS cargo test -p dcp-streams --test streams spec_section_12 -- --nocapture > "$RUNNER_TEMP/noserver.log" 2>&1; then
+            cat "$RUNNER_TEMP/noserver.log"
+            echo "::error::dcp-streams passed with no server"
+            exit 1
+          fi
+          grep -q "DCP_STREAMS_URL is not set" "$RUNNER_TEMP/noserver.log"
+      - name: DCP_SKIP_STREAMS=1 skips explicitly and says so
+        env:
+          DCP_SKIP_STREAMS: '1'
+        run: |
+          env -u DCP_STREAMS_URL cargo test -p dcp-streams --test streams -- --nocapture 2>&1 | tee "$RUNNER_TEMP/skip.log"
+          grep -q "SKIPPED .*(DCP_SKIP_STREAMS=1)" "$RUNNER_TEMP/skip.log"
+
+      # ---------------------------------------------------------------- Node reference server
+      - name: Unit tests (crypto, wire, rules)
+        run: cargo test -p dcp-streams --lib -- --nocapture
+
+      - name: Node reference server, file-backed - conformance journeys, properties, restart
+        env:
+          DCP_STREAMS_LABEL: node reference server 0.3.9
+          DCP_MEASURE_OUT: ${{ github.workspace }}/streams-logs/measure-node.jsonl
+        run: |
+          set -euo pipefail
+          eval "$(scripts/streams-up.sh node)"
+          trap 'cp "$DCP_STREAMS_LOG" "$GITHUB_WORKSPACE/streams-logs/node-server.log" 2>/dev/null || true; scripts/streams-down.sh node' EXIT
+          cargo test -p dcp-streams --test streams --no-fail-fast -- --nocapture --test-threads=2 2>&1 | tee "$GITHUB_WORKSPACE/streams-logs/node-tests.log"
+
+      # ---------------------------------------------------------------- Go server, same suite
+      - name: Go server (Caddy plugin) v0.3.0, file-backed - conformance journeys and properties
+        env:
+          DCP_STREAMS_LABEL: go server (caddy plugin) 0.3.0
+        run: |
+          set -euo pipefail
+          eval "$(STREAMS_PORT=4438 scripts/streams-up.sh caddy)"
+          trap 'cp "$DCP_STREAMS_LOG" "$GITHUB_WORKSPACE/streams-logs/caddy-server.log" 2>/dev/null || true; STREAMS_PORT=4438 scripts/streams-down.sh caddy' EXIT
+          cargo test -p dcp-streams --test streams --no-fail-fast -- --nocapture --test-threads=2 --skip restart 2>&1 | tee "$GITHUB_WORKSPACE/streams-logs/caddy-tests.log"
+
+      # ---------------------------------------------------------------- what a gate in front can do
+      - name: Go server behind basic_auth - a gate by credential
+        run: |
+          set -euo pipefail
+          eval "$(STREAMS_PORT=4439 scripts/streams-up.sh caddy-auth)"
+          trap 'cp "$DCP_STREAMS_LOG" "$GITHUB_WORKSPACE/streams-logs/caddy-auth-server.log" 2>/dev/null || true; STREAMS_PORT=4439 scripts/streams-down.sh caddy-auth' EXIT
+          DCP_STREAMS_AUTH_URL="$DCP_STREAMS_URL" env -u DCP_STREAMS_URL cargo test -p dcp-streams --test streams auth:: -- --nocapture 2>&1 | tee "$GITHUB_WORKSPACE/streams-logs/caddy-auth-tests.log"
+
+      - name: Upload logs and measurements
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: streams-logs
+          path: streams-logs/
+          if-no-files-found: warn
+
+  measure:
+    name: measurements (release build, Node and Go servers)
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.measure || contains(github.event.head_commit.message, '[measure]') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    defaults:
+      run:
+        working-directory: tools/collab-spike
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          workspaces: tools/collab-spike
+          shared-key: collab-spike-b-release
+
+      - name: Output directory
+        run: mkdir -p "$GITHUB_WORKSPACE/streams-logs"
+
+      - name: Versions
+        run: |
+          rustc --version
+          cargo --version
+          node --version
+          uname -a
+          nproc
+          free -m
+          lscpu | grep -E "Model name|MHz" || true
+
+      - name: Install the pinned reference server (npm ci)
+        working-directory: tools/collab-spike/scripts/streams-server
+        run: npm ci --no-audit --no-fund
+
+      - name: Build the tests in release mode
+        run: cargo test --release -p dcp-streams --test streams --no-run
+
+      - name: Measurements, Node reference server (release build of the client)
+        env:
+          DCP_MEASURE_OUT: ${{ github.workspace }}/streams-logs/measure-node.jsonl
+          DCP_MEASURE_MAX_MB: '256'
+        run: |
+          set -euo pipefail
+          eval "$(scripts/streams-up.sh node)"
+          trap 'cp "$DCP_STREAMS_LOG" "$GITHUB_WORKSPACE/streams-logs/node-server-measure.log" 2>/dev/null || true; scripts/streams-down.sh node' EXIT
+          cargo test --release -p dcp-streams --test streams measure:: -- --ignored --test-threads=1 --nocapture 2>&1 | tee "$GITHUB_WORKSPACE/streams-logs/measure-node.log"
+
+      - name: Measurements, Go server
+        if: ${{ !cancelled() }}
+        env:
+          DCP_MEASURE_OUT: ${{ github.workspace }}/streams-logs/measure-caddy.jsonl
+          DCP_MEASURE_MAX_MB: '256'
+        run: |
+          set -euo pipefail
+          eval "$(STREAMS_PORT=4438 scripts/streams-up.sh caddy)"
+          trap 'cp "$DCP_STREAMS_LOG" "$GITHUB_WORKSPACE/streams-logs/caddy-server-measure.log" 2>/dev/null || true; STREAMS_PORT=4438 scripts/streams-down.sh caddy' EXIT
+          cargo test --release -p dcp-streams --test streams measure:: -- --ignored --test-threads=1 --nocapture 2>&1 | tee "$GITHUB_WORKSPACE/streams-logs/measure-caddy.log"
+
+      - name: Restart and crash timings (release build)
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          DCP_STREAMS_URL=http://127.0.0.1:1/v1/stream/ cargo test --release -p dcp-streams --test streams restart:: -- --nocapture --test-threads=1 2>&1 | tee "$GITHUB_WORKSPACE/streams-logs/restart-release.log"
+
+      - name: Upload measurements
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: streams-measurements
+          path: streams-logs/
+          if-no-files-found: warn
