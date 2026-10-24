@@ -25,6 +25,11 @@
 //! `CHURN OUTCOME`), because an overloaded session failing is a result. Only
 //! the consistency of the counting itself is still asserted.
 //!
+//! `DCP_DRAIN_BURST=1` (default Synapse) spends the editor's message budget
+//! before the session starts (see `dcp_interop::profile`): the regime where
+//! the homeserver's limit is already the binding one, to see what Collabora
+//! does when the host's PutFile and LOCK answers are paced by it.
+//!
 //! Needs both services like `collabora_over_matrix.rs` (and `--test-threads=1`).
 //! Meaningful on the default Synapse profile; it runs, and says which profile
 //! it ran on, on either.
@@ -120,7 +125,7 @@ async fn a_scripted_collabora_session_and_the_homeservers_event_limits() {
     let editor_store = rig.handles.editor.clone();
     println!(
         "CHURN run '{label}': profile {}, {secs} s of typing every {every} s, tail up to {tail} s, room {}",
-        syn.profile, rig.doc
+        dcp_interop::profile::label(&syn), rig.doc
     );
 
     let before = editor_store.stats();
@@ -250,7 +255,7 @@ async fn a_scripted_collabora_session_and_the_homeservers_event_limits() {
         &syn,
         "collabora_churn",
         json!({
-            "label": label, "typing_secs": secs, "type_every_secs": every, "typed": typed, "window_secs": window_secs,
+            "label": label, "synapse_profile": dcp_interop::profile::label(&syn), "typing_secs": secs, "type_every_secs": every, "typed": typed, "window_secs": window_secs,
             "per_minute_state_timeline": per_minute, "events_by_type": by_type, "events_by_sender": by_sender,
             "wopi_requests": wopi, "put_autosave": autosave_puts, "put_exit_save": exit_puts, "put_other": plain_puts, "put_refused": refused_puts,
             "locks": locks, "versions_after": versions, "unlock_seen": unlock_after.is_some(),

@@ -248,6 +248,25 @@ jobs:
           trap 'docker logs "$DCP_SYNAPSE_CONTAINER" > "$GITHUB_WORKSPACE/out/synapse-aggressive.log" 2>&1 || true; docker logs dcp-collabora > "$GITHUB_WORKSPACE/out/collabora-aggressive.log" 2>&1 || true; scripts/synapse-down.sh default' EXIT
           echo "Synapse $DCP_SYNAPSE_VERSION, profile $DCP_SYNAPSE_PROFILE, image $DCP_SYNAPSE_IMAGE_ID"
           cargo test -p dcp-interop --locked --test collabora_churn -- --nocapture --test-threads=1 2>&1 | tee "$GITHUB_WORKSPACE/out/churn-aggressive.log"
+      # The same aggressive timers for an editor whose message budget is already spent: the homeserver's limit is the binding one.
+      - name: Churn, aggressive timers, editor's message budget spent first, stress mode
+        if: ${{ !cancelled() }}
+        env:
+          DCP_WOPI_HOST_PORT: '18080'
+          DCP_MEASURE_OUT: ${{ github.workspace }}/out/churn.jsonl
+          DCP_CHURN_LABEL: aggressive-drained
+          DCP_CHURN_STRESS: '1'
+          DCP_DRAIN_BURST: '1'
+          DCP_COLLABORA_WAIT_SECS: '120'
+          COLLABORA_LOCK_REFRESH_SECS: '10'
+          COLLABORA_EXTRA_PARAMS: '--o:per_document.autosave_duration_secs=5 --o:per_document.idlesave_duration_secs=3'
+        run: |
+          set -euo pipefail
+          ./scripts/collabora-up.sh
+          eval "$(scripts/synapse-up.sh default)"
+          trap 'docker logs "$DCP_SYNAPSE_CONTAINER" > "$GITHUB_WORKSPACE/out/synapse-aggressive-drained.log" 2>&1 || true; docker logs dcp-collabora > "$GITHUB_WORKSPACE/out/collabora-aggressive-drained.log" 2>&1 || true; scripts/synapse-down.sh default' EXIT
+          echo "Synapse $DCP_SYNAPSE_VERSION, profile $DCP_SYNAPSE_PROFILE, image $DCP_SYNAPSE_IMAGE_ID"
+          cargo test -p dcp-interop --locked --test collabora_churn -- --nocapture --test-threads=1 2>&1 | tee "$GITHUB_WORKSPACE/out/churn-aggressive-drained.log"
       - name: Summary
         if: ${{ !cancelled() }}
         run: grep -h "^CHURN" "$GITHUB_WORKSPACE"/out/churn-*.log || true
