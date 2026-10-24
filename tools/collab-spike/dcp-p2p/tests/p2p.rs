@@ -350,10 +350,21 @@ async fn content_from_a_member_that_has_not_seen_the_removal_is_readable_by_the_
     // The owner, the only one who knows, goes away before the editor returns.
     owner.set_online(false).await.unwrap();
     editor.set_online(true).await.unwrap();
-    wait_for("the removed viewer lists the new version", Duration::from_secs(30), || async {
+    let seen = wait_soft(Duration::from_secs(30), || async {
         viewer.versions(&doc).await.ok()?.iter().any(|v| v.id == stale.id).then_some(())
     })
     .await;
+    if seen.is_none() {
+        eprintln!("DIAG viewer role {:?}", viewer.role(&doc).await);
+        eprintln!("DIAG viewer members {:?}", viewer.members(&doc).await);
+        eprintln!("DIAG viewer versions {:?}", viewer.versions(&doc).await.map(|v| v.len()));
+        eprintln!("DIAG viewer ops (applied, pending, rejected) {:?}", viewer.op_counts(&doc).await);
+        eprintln!("DIAG viewer entries {:?}", viewer.entry_count(&doc).await);
+        eprintln!("DIAG viewer counters {:?}", viewer.counters(&doc).await);
+        eprintln!("DIAG editor ops {:?} entries {:?} counters {:?}", editor.op_counts(&doc).await, editor.entry_count(&doc).await, editor.counters(&doc).await);
+        eprintln!("DIAG editor members {:?}", editor.members(&doc).await);
+        panic!("the removed viewer never listed the new version");
+    }
     let v = viewer.versions(&doc).await.unwrap().into_iter().find(|v| v.id == stale.id).unwrap();
     assert_eq!(viewer.fetch_file(&doc, &v).await.unwrap(), secret);
     eprintln!("MEASURE removed member read a version published after its removal by a member that had not applied it: yes");
