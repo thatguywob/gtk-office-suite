@@ -106,9 +106,10 @@ async fn conditional_put_semantics() {
     for i in 0..rounds {
         let n = format!("{name}-race-m-{i}");
         let e0 = put(&a, &n, b"base", &[("If-None-Match", "*")]).await.etag().unwrap();
+        let hdr = [("If-Match", e0.as_str())];
         let (w1, w2) = tokio::join!(
-            put(&a, &n, b"writer-one", &[("If-Match", e0.as_str())]),
-            put(&a, &n, b"writer-2", &[("If-Match", e0.as_str())])
+            put(&a, &n, b"writer-one", &hdr),
+            put(&a, &n, b"writer-2", &hdr)
         );
         *statuses.entry(format!("{}+{}", w1.status.min(w2.status), w1.status.max(w2.status))).or_default() += 1;
         match (w1.ok(), w2.ok()) {
@@ -123,9 +124,10 @@ async fn conditional_put_semantics() {
     let (mut both, mut one, mut none, mut statuses) = (0, 0, 0, std::collections::BTreeMap::<String, u32>::new());
     for i in 0..rounds {
         let n = format!("{name}-race-c-{i}");
+        let hdr = [("If-None-Match", "*")];
         let (w1, w2) = tokio::join!(
-            put(&a, &n, b"creator-one", &[("If-None-Match", "*")]),
-            put(&a, &n, b"creator-2", &[("If-None-Match", "*")])
+            put(&a, &n, b"creator-one", &hdr),
+            put(&a, &n, b"creator-2", &hdr)
         );
         *statuses.entry(format!("{}+{}", w1.status.min(w2.status), w1.status.max(w2.status))).or_default() += 1;
         match (w1.ok(), w2.ok()) {
