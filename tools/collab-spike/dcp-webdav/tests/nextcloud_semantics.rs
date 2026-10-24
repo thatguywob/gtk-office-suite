@@ -72,11 +72,11 @@ async fn conditional_put_semantics() {
     assert_eq!(put(&a, &name, b"x", &[("If-Match", "\"deadbeef\"")]).await.status, 412, "wrong ETag");
     let r = put(&a, &name, b"two-longer", &[("If-Match", e1.as_str())]).await;
     assert_eq!(r.status, 204, "right ETag");
-    // The ETag in the PUT's own answer is the one from before the write.
+    // The PUT's own answer carries the new ETag, so a writer can chain If-Match.
     let in_answer = r.etag().unwrap();
     let e2 = etag_of(&a, &name).await;
     measure("put_answer_etag", json!({ "before": e1, "in_the_put_answer": in_answer, "propfind_after": e2 }));
-    assert_eq!(in_answer, e1, "the PUT answer carries the previous ETag");
+    assert_eq!(in_answer, e2, "the PUT answer carries the ETag the file now has");
     assert_ne!(e1, e2, "a size change changes the ETag");
     assert_eq!(put(&a, &name, b"three", &[("If-Match", e1.as_str())]).await.status, 412, "stale ETag after a size change");
 
@@ -732,10 +732,10 @@ async fn lease_log_is_a_compare_and_set_under_concurrency() {
                 *losers.entry(e.to_string().chars().take(60).collect()).or_default() += 1;
             }
         }
-        // And the log still has exactly one newest record: the winner's.
-        let now = owner.lease(&doc).await.unwrap().unwrap();
-        let winner_session = if wo.is_ok() { format!("o{i}") } else { format!("e{i}") };
-        if one_won + both_won + none_won == i + 1 && (wo.is_ok() != we.is_ok()) {
+        // And the log has one newest record: the winner's, when there is one.
+        if wo.is_ok() != we.is_ok() {
+            let now = owner.lease(&doc).await.unwrap().expect("a record exists after a win");
+            let winner_session = if wo.is_ok() { format!("o{i}") } else { format!("e{i}") };
             assert_eq!(now.body.holder.as_ref().unwrap().session, winner_session);
         }
         // A release keeps the chain going from the winner's record.

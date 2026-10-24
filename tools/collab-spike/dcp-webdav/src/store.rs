@@ -33,7 +33,7 @@
 //! [`StoreError::Conflict`].
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -87,10 +87,20 @@ pub struct WebdavStore {
     /// Set by the conformance fixture's fault hook: the next version upload is
     /// cut to half its bytes.
     truncate_next: Arc<AtomicBool>,
-    /// The lease record number this handle last read, per document (`None`: it
-    /// read and there was no record). The next lease write is created one above
-    /// it, which is the compare-and-set.
-    seen_lease: Mutex<HashMap<String, Option<u64>>>,
+    /// The newest lease record this handle has read or written, per document.
+    /// The next lease write is created one above its number, which is the
+    /// compare-and-set; and a read only has to ask for the record after it.
+    seen_lease: Mutex<HashMap<String, LeaseCache>>,
+    /// How long this handle's last lease upload took, in milliseconds. The server
+    /// stamps the record in the middle of the request, so half of it is added to
+    /// the time the record carries.
+    last_put_ms: AtomicU64,
+}
+
+#[derive(Clone, Default)]
+struct LeaseCache {
+    seq: Option<u64>,
+    record: Option<Stamped<Lease>>,
 }
 
 fn rand_hex(bytes: usize) -> String {
@@ -167,6 +177,7 @@ impl WebdavStore {
             clock,
             truncate_next,
             seen_lease: Mutex::new(HashMap::new()),
+            last_put_ms: AtomicU64::new(0),
         }
     }
 
@@ -194,54 +205,69 @@ impl WebdavStore {
         format!("{seq:08}.json")
     }
 
-    /// The newest lease record, with its number. Retries when the newest file is
-    /// deleted between the listing and the read.
+    fn parse_lease(&self, r: &crate::dav::Resp, seq: u64) -> Result<Stamped<Lease>> {
+        let file: LeaseFile = serde_json::from_slice(&r.body)
+            .map_err(|e| StoreError::Invalid(format!("lease record {seq}: {e}")))?;
+        schema::validate_typed(Kind::Lease, &file.lease).map_err(|e| StoreError::Invalid(e.to_string()))?;
+        // The record's own time is a calibrated estimate; the server's
+        // Last-Modified is the binding's stamp. Believe the estimate only if the
+        // stamp agrees with it to within two seconds.
+        let stamp = r.server_time_ms().unwrap_or(file.at_ms);
+        let ts = if file.at_ms.abs_diff(stamp) < 2000 { file.at_ms } else { stamp };
+        Ok(Stamped::new(format!("{seq:08}"), ts, file.by, file.lease))
+    }
+
+    /// The newest lease record, with its number.
+    ///
+    /// Records are never changed or deleted, so a handle that has read record `n`
+    /// only asks for `n + 1`, then `n + 2`, until the server says there is none: one
+    /// request when nothing changed. The first read of a document lists the folder.
+    /// (A member whose share was removed gets `404` for `n + 1` as well, so a
+    /// removed member's `lease()` keeps answering with what it last saw.)
     async fn lease_read(&self, doc: &str) -> Result<Option<(u64, Stamped<Lease>)>> {
         let dir = l_dir(doc);
-        for _ in 0..4 {
-            let (_, entries) = self
-                .dav
-                .propfind(
-                    &self.dav.files_path(&format!("{dir}/")),
-                    1,
-                    &["d:getlastmodified"],
-                )
-                .await?;
-            let newest = entries
-                .iter()
-                .filter_map(|e| {
-                    let n = e.name();
-                    n.strip_suffix(".json")
-                        .filter(|s| s.len() == 8)
-                        .and_then(|s| s.parse::<u64>().ok())
-                })
-                .max();
-            let Some(seq) = newest else {
-                return Ok(None);
-            };
-            let r = self.dav.get(&format!("{dir}/{}", Self::lease_name(seq))).await?;
-            if r.status == 404 {
-                continue;
+        let cached = self.seen_lease.lock().get(doc).cloned();
+        let mut cache = match cached {
+            Some(c) => c,
+            None => {
+                let (_, entries) = self
+                    .dav
+                    .propfind(&self.dav.files_path(&format!("{dir}/")), 1, &["d:getlastmodified"])
+                    .await?;
+                let newest = entries
+                    .iter()
+                    .filter_map(|e| {
+                        let n = e.name();
+                        n.strip_suffix(".json")
+                            .filter(|s| s.len() == 8)
+                            .and_then(|s| s.parse::<u64>().ok())
+                    })
+                    .max();
+                match newest {
+                    None => LeaseCache::default(),
+                    Some(seq) => {
+                        let r = self.dav.get(&format!("{dir}/{}", Self::lease_name(seq))).await?;
+                        if !r.ok() {
+                            return Err(status_error("read the lease", &r));
+                        }
+                        LeaseCache { seq: Some(seq), record: Some(self.parse_lease(&r, seq)?) }
+                    }
+                }
             }
-            if !r.ok() {
-                return Err(status_error("read the lease", &r));
+        };
+        loop {
+            let next = cache.seq.map_or(0, |s| s + 1);
+            let r = self.dav.get(&format!("{dir}/{}", Self::lease_name(next))).await?;
+            match r.status {
+                404 => break,
+                200..=299 => {
+                    cache = LeaseCache { seq: Some(next), record: Some(self.parse_lease(&r, next)?) };
+                }
+                _ => return Err(status_error("read the lease", &r)),
             }
-            let file: LeaseFile = serde_json::from_slice(&r.body)
-                .map_err(|e| StoreError::Invalid(format!("lease record {seq}: {e}")))?;
-            schema::validate_typed(Kind::Lease, &file.lease)
-                .map_err(|e| StoreError::Invalid(e.to_string()))?;
-            // The record's own time is a calibrated estimate; the server's
-            // Last-Modified is the binding's stamp. Believe the estimate only if
-            // the stamp agrees with it to within two seconds.
-            let stamp = r.server_time_ms().unwrap_or(file.at_ms);
-            let ts = if file.at_ms.abs_diff(stamp) < 2000 { file.at_ms } else { stamp };
-            let sender = file.by.clone();
-            return Ok(Some((
-                seq,
-                Stamped::new(format!("{seq:08}"), ts, sender, file.lease),
-            )));
         }
-        Err(StoreError::Transport("the lease log kept changing under the read".into()))
+        self.seen_lease.lock().insert(doc.to_owned(), cache.clone());
+        Ok(cache.seq.zip(cache.record))
     }
 
     // -------------------------------------------------------------- shares
@@ -372,14 +398,23 @@ impl DocumentStore for WebdavStore {
             .propfind(
                 &self.dav.files_path(&format!("{}/", v_dir(doc))),
                 0,
-                &["oc:permissions", "oc:owner-id"],
+                &["oc:permissions", "oc:owner-id", "ocm:share-permissions"],
             )
             .await?;
         let e = entries
             .first()
             .ok_or_else(|| StoreError::NotFound(doc.clone()))?;
-        if e.get(OC, "owner-id") == Some(self.dav.user.as_str()) {
+        let owner = e.get(OC, "owner-id").unwrap_or("");
+        if owner == self.dav.user {
             return Ok(Role::Owner);
+        }
+        // A federated mount names its owner by cloud id (`alice@nc-a`). The
+        // receiving server always shows it the share right (`R`) and a full set of
+        // write rights, whatever the sender granted: only the OCM permission list
+        // says read or write. Owner and create-only are not expressible there.
+        if owner.contains('@') {
+            let list = e.get("http://open-cloud-mesh.org/ns", "share-permissions").unwrap_or("");
+            return Ok(if list.contains("\"write\"") { Role::Editor } else { Role::Viewer });
         }
         // On a mount root: R = may reshare, C = may create files. A viewer has
         // neither (its D and N are the right to unmount).
@@ -604,26 +639,19 @@ impl DocumentStore for WebdavStore {
 
     async fn lease(&self, doc: &DocId) -> Result<Option<Stamped<Lease>>> {
         check_doc(doc)?;
-        let read = self.lease_read(doc).await?;
-        self.seen_lease
-            .lock()
-            .insert(doc.clone(), read.as_ref().map(|(s, _)| *s));
-        Ok(read.map(|(_, l)| l))
+        Ok(self.lease_read(doc).await?.map(|(_, l)| l))
     }
 
     async fn write_lease(&self, doc: &DocId, lease: Lease) -> Result<Stamped<Lease>> {
         check_doc(doc)?;
         schema::validate_typed(Kind::Lease, &lease).map_err(|e| StoreError::Invalid(e.to_string()))?;
-        let known = self.seen_lease.lock().get(doc.as_str()).copied();
+        let known = self.seen_lease.lock().get(doc.as_str()).map(|c| c.seq);
         let seen = match known {
             Some(s) => s,
-            None => {
-                let read = self.lease_read(doc).await?;
-                read.map(|(s, _)| s)
-            }
+            None => self.lease_read(doc).await?.map(|(s, _)| s),
         };
         let next = seen.map_or(0, |s| s + 1);
-        let at_ms = self.clock.now_ms();
+        let at_ms = self.clock.now_ms() + self.last_put_ms.load(Ordering::Relaxed) / 2;
         let file = LeaseFile {
             by: self.principal(),
             at_ms,
@@ -634,10 +662,15 @@ impl DocumentStore for WebdavStore {
             .dav
             .put_new(&format!("{}/{}", l_dir(doc), Self::lease_name(next)), body)
             .await?;
+        self.last_put_ms.store(r.elapsed.as_millis() as u64, Ordering::Relaxed);
         match r.status {
             201 | 204 => {
-                self.seen_lease.lock().insert(doc.clone(), Some(next));
-                Ok(Stamped::new(format!("{next:08}"), at_ms, self.principal(), lease))
+                let record = Stamped::new(format!("{next:08}"), at_ms, self.principal(), lease);
+                self.seen_lease.lock().insert(
+                    doc.clone(),
+                    LeaseCache { seq: Some(next), record: Some(record.clone()) },
+                );
+                Ok(record)
             }
             412 | 423 => Err(StoreError::Conflict(format!(
                 "lease record {next} was taken first (HTTP {})",

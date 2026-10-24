@@ -82,13 +82,22 @@ jobs:
           if-no-files-found: warn
 
   webdav:
-    name: dcp-webdav against Nextcloud (one instance, a federation, OCM receiver)
+    name: dcp-webdav against Nextcloud ${{ matrix.version }}
     runs-on: ubuntu-24.04
     timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - version: '34.0.5'
+            image: docker.io/library/nextcloud:34.0.5-apache@sha256:1f9212adecae32010cdbf137d7e0db78d08c696dc3e77f1eddcbf902d10209b4
+          - version: '35.0.2'
+            image: docker.io/library/nextcloud:35.0.2-apache@sha256:89af7ee7a96ff5e9668280566209268ae6b2d02327f6ef6d56f6d68228cf9431
     defaults:
       run:
         working-directory: tools/collab-spike
     env:
+      NEXTCLOUD_IMAGE: ${{ matrix.image }}
       DCP_MEASURE_OUT: ${{ github.workspace }}/measurements/measure.jsonl
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -134,17 +143,24 @@ jobs:
       - name: Start two Nextcloud instances
         run: scripts/nextcloud-up.sh a b 2>&1 | tee "$RUNNER_TEMP/up.log"
       - name: Conformance journeys on one Nextcloud
-        run: cargo test -p dcp-webdav --test conformance_over_nextcloud -- --nocapture --test-threads=1 2>&1 | tee "$GITHUB_WORKSPACE/measurements/conformance-one.log"
         shell: bash
+        run: cargo test -p dcp-webdav --test conformance_over_nextcloud -- --nocapture --test-threads=1 2>&1 | tee "$GITHUB_WORKSPACE/measurements/conformance-one.log"
       - name: Conformance journeys across a federation (alice on A, bob and carol on B)
         if: ${{ !cancelled() }}
+        shell: bash
         run: cargo test -p dcp-webdav --test conformance_over_ocm -- --nocapture --test-threads=1 2>&1 | tee "$GITHUB_WORKSPACE/measurements/conformance-federated.log"
       - name: Semantics (ETags, locks, versions, properties, sharing, authorship, clock, latency)
         if: ${{ !cancelled() }}
+        shell: bash
         run: cargo test -p dcp-webdav --test nextcloud_semantics -- --nocapture --test-threads=1 2>&1 | tee "$GITHUB_WORKSPACE/measurements/semantics.log"
       - name: OCM (discovery, a receiver holding only the share secret, locks across a federation)
         if: ${{ !cancelled() }}
+        shell: bash
         run: cargo test -p dcp-webdav --test federation -- --nocapture --test-threads=1 2>&1 | tee "$GITHUB_WORKSPACE/measurements/federation.log"
+      - name: Spec test 5 with the lease duration as a parameter (4 s and 20 s, both topologies)
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: cargo test -p dcp-webdav --test lease_timing -- --nocapture --test-threads=1 2>&1 | tee "$GITHUB_WORKSPACE/measurements/lease-timing.log"
       - name: Container logs
         if: always()
         run: |
@@ -157,6 +173,6 @@ jobs:
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
-          name: webdav-measurements
+          name: webdav-measurements-${{ matrix.version }}
           path: measurements/
           if-no-files-found: warn

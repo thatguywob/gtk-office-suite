@@ -241,14 +241,9 @@ async fn locks_do_not_cross_a_federation() {
         .await
         .unwrap();
     let bob_put2 = b.request("PUT", &b.files_path(&rel), &[], Some(b"{\"bob\":2}".to_vec())).await.unwrap();
-    let local_put = dav(&url_a(), "bob").request("PUT", &dav(&url_a(), "bob").files_path(&rel), &[], Some(b"{\"bob\":3}".to_vec())).await.unwrap();
-    measure("user_lock_on_the_sender", json!({ "lock_status": ul.status, "receiver_put_status": bob_put2.status, "local_user_put_status_for_comparison": local_put.status }));
+    measure("user_lock_on_the_sender", json!({ "lock_status": ul.status, "receiver_put_status": bob_put2.status }));
     let _ = a.request("UNLOCK", &a.files_path(&rel), &[("X-User-Lock", "1")], None).await;
 
-    // And the version history of the federated file: not offered to the receiver.
-    let fid = a.request("HEAD", &a.files_path(&rel), &[], None).await.unwrap().header("oc-fileid").unwrap_or("").to_owned();
-    let v = b.request("PROPFIND", &format!("/remote.php/dav/versions/bob/versions/{fid}"), &[("Depth", "1")], None).await.unwrap();
-    measure("versions_endpoint_for_a_federated_file", json!({ "status": v.status }));
 }
 
 /// What the receiving server tells a receiver about its role.
@@ -292,8 +287,15 @@ async fn what_a_federated_mount_says_about_the_role() {
         row["remote_shares_on_the_receiver"] = json!(remote
             .as_array()
             .map(|a| a.iter().filter(|s| s["name"].as_str().is_some_and(|n| n.contains(&doc))).map(|s| json!({ "name": s["name"], "permissions": s["permissions"], "accepted": s["accepted"] })).collect::<Vec<_>>()));
-        row["role_as_the_store_reads_it"] = json!(format!("{:?}", bob_b.role(&doc).await.unwrap()));
+        let seen = bob_b.role(&doc).await.unwrap();
+        row["role_as_the_store_reads_it"] = json!(format!("{seen:?}"));
         rows.push(row);
+        // Over OCM only read and write survive: an owner-level share reads as an editor.
+        let expect = match role {
+            Role::Viewer => Role::Viewer,
+            _ => Role::Editor,
+        };
+        assert_eq!(seen, expect, "granted {role:?}");
     }
     measure("federated_mount_permissions_by_granted_role", json!(rows));
 }

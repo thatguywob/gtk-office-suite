@@ -8,6 +8,13 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::Duration;
 
+use async_trait::async_trait;
+use dcp_conformance::wrappers::{Defect, Defective};
+use dcp_conformance::{
+    new_file, standard_meta, Capabilities, Failure, Faults, Fixture, Forger, RealTime, StoreFactory, BASE_FILE,
+};
+use dcp_core::{DocId, DocumentStore, Role, Version};
+use dcp_webdav::ocm::accept_pending_remote_shares;
 use dcp_webdav::{Dav, ServerClock, WebdavConfig, WebdavStore};
 
 pub const PASSWORD: &str = "dcp-user-Passw0rd-spike";
@@ -147,4 +154,166 @@ pub fn stats(mut v: Vec<f64>) -> serde_json::Value {
     let n = v.len();
     let p = |q: f64| v[((n as f64 - 1.0) * q).round() as usize];
     serde_json::json!({ "n": n, "min": v[0], "median": p(0.5), "p95": p(0.95), "max": v[n - 1] })
+}
+
+// ------------------------------------------------------ conformance fixtures
+
+pub struct NcFaults(pub Arc<AtomicBool>);
+
+impl Faults for NcFaults {
+    fn truncate_next_upload(&self) {
+        self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// The viewer's client writing straight into the document folder.
+pub struct NcForger {
+    pub viewer: Arc<WebdavStore>,
+}
+
+#[async_trait]
+impl Forger for NcForger {
+    async fn forge_version(&self, doc: &DocId, version: Version) -> Result<Option<String>, Failure> {
+        let name = unique("forged");
+        Ok(self.viewer.put_raw_version(doc, &name, &version).await?)
+    }
+}
+
+pub fn capabilities() -> Capabilities {
+    Capabilities {
+        grant_revoke: true,
+        // Revocation is access control on a server that holds the plaintext:
+        // content published after it is unreadable to the revoked user, nothing
+        // is encrypted.
+        revocation: true,
+        // The lease log takes any record.
+        arbitrary_lease_writes: true,
+        // Creating a free name is atomic on Nextcloud, so the log is a real
+        // compare-and-set.
+        racy_lease: false,
+        history: true,
+        arbitrary_parents: true,
+        // No ordered update stream in WebDAV (L2).
+        updates: false,
+        upload_faults: true,
+        forgery: true,
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Topology {
+    /// alice, bob and carol on `nc-a`.
+    Single,
+    /// alice on `nc-a`; bob and carol on `nc-b`, reaching the document only
+    /// through Open Cloud Mesh shares they accepted there.
+    Federated,
+}
+
+pub struct NcFactory {
+    pub topology: Topology,
+    pub clock_a: Arc<ServerClock>,
+    pub clock_b: Option<Arc<ServerClock>>,
+    pub hide_newest_from_viewer: bool,
+}
+
+impl NcFactory {
+    pub async fn single(hide_newest_from_viewer: bool) -> NcFactory {
+        NcFactory {
+            topology: Topology::Single,
+            clock_a: clock(&url_a()).await,
+            clock_b: None,
+            hide_newest_from_viewer,
+        }
+    }
+
+    pub async fn federated() -> NcFactory {
+        NcFactory {
+            topology: Topology::Federated,
+            clock_a: clock(&url_a()).await,
+            clock_b: Some(clock(&url_b()).await),
+            hide_newest_from_viewer: false,
+        }
+    }
+}
+
+#[async_trait]
+impl StoreFactory for NcFactory {
+    fn name(&self) -> String {
+        match (self.topology, self.hide_newest_from_viewer) {
+            (_, true) => "nextcloud with a defective viewer".into(),
+            (Topology::Single, _) => format!("nextcloud ({})", url_a()),
+            (Topology::Federated, _) => {
+                "nextcloud over OCM (alice@nc-a owner; bob@nc-b editor, carol@nc-b viewer)".into()
+            }
+        }
+    }
+
+    fn capabilities(&self) -> Capabilities {
+        capabilities()
+    }
+
+    async fn fresh(&self) -> Result<Fixture, Failure> {
+        let fault = Arc::new(AtomicBool::new(false));
+        let owner = Arc::new(store(&url_a(), "alice", &self.clock_a, &fault));
+        let (editor, viewer) = match self.topology {
+            Topology::Single => (
+                Arc::new(store(&url_a(), "bob", &self.clock_a, &fault)),
+                Arc::new(store(&url_a(), "carol", &self.clock_a, &fault)),
+            ),
+            Topology::Federated => {
+                let cb = self.clock_b.as_ref().expect("a federation has a second clock");
+                (
+                    Arc::new(store(&url_b(), "bob", cb, &fault)),
+                    Arc::new(store(&url_b(), "carol", cb, &fault)),
+                )
+            }
+        };
+        let viewer_dyn: Arc<dyn DocumentStore> = if self.hide_newest_from_viewer {
+            Arc::new(Defective::new(viewer.clone(), Defect::HideNewest))
+        } else {
+            viewer.clone()
+        };
+        let faults = Some(Arc::new(NcFaults(fault)) as Arc<dyn Faults>);
+        let mut fx = match self.topology {
+            Topology::Single => {
+                Fixture::standard(
+                    owner,
+                    editor,
+                    viewer_dyn,
+                    Arc::new(RealTime),
+                    capabilities(),
+                    faults,
+                    // Nextcloud is one database: what one handle wrote the next reads.
+                    Duration::ZERO,
+                )
+                .await?
+            }
+            Topology::Federated => {
+                let doc = owner.create_document(&standard_meta(), Some(new_file(BASE_FILE))).await?;
+                owner.grant(&doc, &editor.principal(), Role::Editor).await?;
+                owner.grant(&doc, &viewer.principal(), Role::Viewer).await?;
+                // A remote share waits on the receiving server until its user accepts it.
+                for (who, dav) in [("bob", editor.dav()), ("carol", viewer.dav())] {
+                    let n = accept_pending_remote_shares(dav, &doc).await?;
+                    if n != 2 {
+                        return Err(Failure::new(format!("{who} had {n} pending shares of {doc}, expected 2")));
+                    }
+                }
+                Fixture::from_existing(
+                    owner,
+                    editor,
+                    viewer_dyn,
+                    doc,
+                    Arc::new(RealTime),
+                    capabilities(),
+                    faults,
+                    // Two servers and a share between them: allow some time.
+                    Duration::from_secs(5),
+                )
+                .await?
+            }
+        };
+        fx.forger = Some(Arc::new(NcForger { viewer }));
+        Ok(fx)
+    }
 }
