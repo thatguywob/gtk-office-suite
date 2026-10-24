@@ -1,0 +1,98 @@
+name: collab-spike-c
+
+# RFC-0004 spike C: the DCP peer-to-peer binding (iroh + p2panda), crate dcp-p2p. Runs only on the
+# spike branch and by hand; the conformance policy for pull requests is dealt with at integration.
+#
+#   check       cargo check of dcp-p2p, and the dependency tree the build resolved to
+#   upstream    p2panda-net 0.7.1's own tests, built from the crates.io source against whatever iroh
+#               1.x cargo resolves today (does the published stack build and pass on this toolchain?)
+#   test        dcp-p2p: spec section 12 journeys through run_all, and the tests conformance cannot see
+#   measure     the measurements of docs/rfc/0004-spike-c-results.md (release build)
+#   relay       the connect-through-a-relay test (iroh's in-process relay server)
+#
+# Nothing here needs a service: every node binds 127.0.0.1 and no n0 relay or DNS is contacted.
+on:
+  push:
+    branches: [spike/collab-c]
+    paths:
+      - 'tools/collab-spike/**'
+      - '.github/workflows/collab-spike-c.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: collab-spike-c-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  CARGO_PROFILE_TEST_DEBUG: line-tables-only
+  CARGO_INCREMENTAL: 0
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: cargo check -p dcp-p2p
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: tools/collab-spike
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          workspaces: tools/collab-spike
+          shared-key: collab-spike-c
+      - name: Versions
+        run: |
+          rustc --version
+          cargo --version
+      - name: cargo check -p dcp-p2p --all-targets
+        run: cargo check -p dcp-p2p --all-targets
+      - name: Resolved versions of the stack
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/results"
+          cargo tree -p dcp-p2p --depth 1 | tee "$GITHUB_WORKSPACE/results/cargo-tree-depth1.txt"
+          for c in iroh iroh-blobs iroh-base noq p2panda-core p2panda-store p2panda-sync p2panda-auth p2panda-encryption p2panda-spaces cbor-core sqlx libsqlite3-sys; do
+            grep -A1 "name = \"$c\"" Cargo.lock | head -2 | tr '\n' ' '; echo
+          done | tee "$GITHUB_WORKSPACE/results/resolved-versions.txt"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        if: always()
+        with:
+          name: spike-c-check
+          path: results/
+          if-no-files-found: warn
+
+  upstream:
+    name: p2panda-net 0.7.1 upstream tests, as published
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    continue-on-error: true
+    steps:
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+      - name: Fetch the published crate and run its own e2e test and its sync unit tests
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/up" && cd "$RUNNER_TEMP/up"
+          curl -sSfL https://static.crates.io/crates/p2panda-net/p2panda-net-0.7.1.crate | tar xz
+          cd p2panda-net-0.7.1
+          rustc --version | tee "$GITHUB_WORKSPACE/upstream.txt"
+          # No Cargo.lock ships with the crate: cargo resolves today's newest compatible iroh.
+          { cargo test --features test_utils --test e2e -- --nocapture 2>&1; echo "exit: $?"; } | tee -a "$GITHUB_WORKSPACE/upstream.txt" || true
+          cargo tree -i iroh 2>&1 | head -3 | tee -a "$GITHUB_WORKSPACE/upstream.txt" || true
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        if: always()
+        with:
+          name: spike-c-upstream
+          path: upstream.txt
+          if-no-files-found: warn
