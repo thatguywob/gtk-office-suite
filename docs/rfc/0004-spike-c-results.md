@@ -1,6 +1,6 @@
 # RFC-0004 Spike C: iroh and p2panda binding results
 
-Date: 2026-10-24 · Tracks: [RFC-0004](0004-interoperable-document-collaboration.md), [DCP draft 1 §8.4](../DOCUMENT-COLLABORATION-SPEC.md) · Code: [`tools/collab-spike/dcp-p2p/`](../../tools/collab-spike/dcp-p2p/) (branch `spike/collab-c`) · Workflow: [`collab-spike-c.yml`](../../.github/workflows/collab-spike-c.yml) · Raw data: CI artifacts `spike-c-check`, `spike-c-test`, `spike-c-measure`, `spike-c-relay`, `spike-c-flatpak`, `spike-c-upstream` of run @@RUN@@
+Date: 2026-10-24 · Tracks: [RFC-0004](0004-interoperable-document-collaboration.md), [DCP draft 1 §8.4](../DOCUMENT-COLLABORATION-SPEC.md) · Code: [`tools/collab-spike/dcp-p2p/`](../../tools/collab-spike/dcp-p2p/) (branch `spike/collab-c`) · Workflow: [`collab-spike-c.yml`](../../.github/workflows/collab-spike-c.yml) · Raw data: CI artifacts `spike-c-check`, `spike-c-test`, `spike-c-measure`, `spike-c-relay`, `spike-c-flatpak`, `spike-c-upstream` of run [40139997921](https://github.com/tuna-os/gtk-office-suite/actions/runs/40139997921)
 
 **Every number here comes from CI runs on a shared 4-vCPU GitHub-hosted runner (AMD EPYC 9V74,
 16 GB, rustc 1.99.1) with all nodes on loopback, in one process or one sandbox.** There was no WAN
@@ -43,7 +43,7 @@ from what the RFC hoped in six ways that matter. The load-bearing results:
 5. **Availability needs overlap, not an always-on server.** A version published by a member who goes
    offline reaches another member through any third member that was online with both; if its only
    holder is offline it reaches nobody, and arrives when the holder returns (measured).
-6. **p2panda-spaces 0.7.1 does not scale in entries.** A reader needed 0.67 s for 100 entries, 6.4 s
+6. **p2panda-spaces 0.7.1 does not scale in entries.** A reader needed 0.59 s for 100 entries, 6.1 s
    for 300 and 81 s for 1,000 after the last publish, because the persisted state it rewrites on every
    message grows by the size of every message (2.1 MB at 1,000). Versions are fine; inline updates
    past a few hundred per document are not, on this library.
@@ -210,18 +210,26 @@ are created under one exclusive lock and a receiver stores a batch in one transa
 sessions take the membership gate and the log under one lock (see "Revocation"). It passed in the
 next runs.
 
+Two more races showed up while the tests were being repeated, both mine: the membership lock above
+made two nodes that published at the same time wait for each other (a distributed deadlock: each held
+the sessions' read lock across a network wait while its own receiver waited for the write lock; journey 2
+timed out once in 13 repetitions). The receive path no longer takes that lock, a membership change waits
+for sessions at most 5 s, and a session is abandoned after 90 s. The last CI run (run 40139997921) passed 11 of 11
+journeys, 14 of 14 p2p tests, and ten repetitions of the four revocation tests plus three repetitions of
+the journeys, 0 failures. Thirteen repetitions is evidence, not proof, that no race is left.
+
 ### Offline and catch-up
 
 `a_peer_offline_during_publishes_catches_up_on_reconnect`: the viewer goes offline (the node refuses
 and closes every connection), the editor publishes five versions in a chain, nothing reaches the
-viewer in the 1.5 s that follow (asserted), the viewer comes back and lists the head: **@@CATCHUP_DEBUG@@ ms in
-the debug build, @@CATCHUP_REL@@ ms in release** after reconnecting. No always-on peer was involved.
+viewer in the 1.5 s that follow (asserted), the viewer comes back and lists the head: **693 ms in
+the debug build, 52 ms in release** after reconnecting. No always-on peer was involved.
 
 ### Concurrent publishes and merge
 
 `concurrent_publishes_from_two_peers_give_two_heads_and_a_merge_heals_it`: owner and editor are both
 offline, each publishes a child of the same version, both return. **Two heads are visible at all
-three nodes @@TWOHEADS_DEBUG@@ ms (debug) / @@TWOHEADS_REL@@ ms (release) after reconnecting**, none is hidden, the
+three nodes 372 ms (debug) / 55 ms (release) after reconnecting**, none is hidden, the
 owner merges, and all three show one head.
 
 ### A tampered operation
@@ -242,7 +250,7 @@ Three tests, each with a different gate:
 
 1. **Gate off, removed member's node served everything**
    (`a_revoked_member_receives_ciphertext_but_cannot_decrypt_later_entries`): the removed viewer's
-   node received the later operations (@@REVOKED_OPS@@ received), decrypted none of them (entry count unchanged; one
+   node received the later operations (1 in debug, 3 in release received), decrypted none of them (entry count unchanged; one
    application message counted as refused), could not list or fetch the version, and a blob fetched by
    hash was `nonce || ciphertext || tag` (plaintext length + 40 bytes), did not contain the
    plaintext, and hashed (BLAKE3) to the iroh-blobs hash. This is the encryption holding alone.
@@ -250,12 +258,14 @@ Three tests, each with a different gate:
    session is refused, its blob fetch by hash fails (`io: connection lost`), as does a never-member's;
    a member's succeeds.
 3. **The limit** (`content_from_a_member_that_has_not_seen_the_removal_is_readable_by_the_removed_member`):
-   the editor is offline when the owner removes the viewer; `revoke()` returns after @@REVOKE_MS@@ ms (it waits
+   the editor is offline when the owner removes the viewer; `revoke()` returns after 3 (release) / 49 (debug) ms (it waits
    up to 5 s for each reachable member to acknowledge); the editor, unaware, publishes to the old group
    key; the owner goes away; the editor returns and still serves its member list; **the removed viewer
-   listed and read the version** (release: yes). In the debug run of the same test, the viewer had first learned of its removal
-   from the owner through a window between the removal being stored and the gate being updated; closing
-   that window (sessions take the log and the gate under one lock) made the test deterministic.
+   listed and read the version** (release: yes). In two debug runs of the same test the viewer never listed the version. The cause I found and
+   fixed: a session that was queued before the removal could start after it, with the initiator not
+   deciding again whether its peer was still a member, and a session could serve the removal before the
+   gate knew it. Sessions now take the log and the gate under one lock and an initiator decides again
+   under it. This is a diagnosis from reading and from the test passing afterwards, not from a trace.
 
 Removal also rotates the key only for those who apply it: p2panda-encryption's guarantee is "a member
 will not learn about newly created data after it is removed", and the removal reaches a member only
@@ -313,13 +323,13 @@ Results:
   clock, with the editor +60 s, makes `lease_expiry_releases` fail ("the lease did not expire after its
   duration"). So the first-seen stamp is what makes the skew harmless, and the test can fail.
 - **Propagation** (`lease_propagation_latency`, release, 60 writes, polled every 2 ms): a lease write
-  was visible at the other node in min @@L_MIN@@ ms, median @@L_MED@@ ms, p95 @@L_P95@@ ms, max @@L_MAX@@ ms. The settle
+  was visible at the other node in min 9.6 ms, median 13.8 ms, p95 16.0 ms, max 17.3 ms. The settle
   interval of lease rule 3 has to cover this plus a lost round; 500 ms (the Matrix value) covers it
-  by a factor of about 50 on loopback; on a WAN nothing was measured.
+  by a factor of more than 30 on loopback; on a WAN nothing was measured.
 - **Partition** (`partitioned_sessions_both_acquire_the_lease_and_the_merge_picks_one`): both nodes
   offline, each ran `lease::acquire` (two read-backs, 500 ms settle) and both returned `Acquired`;
-  both `holds()` were true. After they reconnected exactly one still held it **@@PART_DEBUG@@ ms (debug) /
-  @@PART_REL@@ ms (release)** later and both named the same record.
+  both `holds()` were true. After they reconnected exactly one still held it **254 ms (debug) /
+  52 ms (release)** later and both named the same record.
 
 So a peer-to-peer binding can offer L1 leases only as advisory: a lease that stops two sessions
 that can see each other from both holding it, and not one that survives a partition. Version rule 5
@@ -330,9 +340,9 @@ that can see each other from both holding it, and not one that survives a partit
 
 `members_never_online_together_need_a_third_member_that_overlaps_both`: *phase 1*, the viewer is away,
 the editor publishes and leaves, the viewer returns: the viewer got the version through the owner,
-which had been online with both (@@VIA3_REL@@ ms in release). *Phase 2*, the owner and the viewer are away while the
+which had been online with both (51 ms in release). *Phase 2*, the owner and the viewer are away while the
 editor publishes and leaves: the viewer and the owner come back and **neither has the version** for
-the 3 s asserted; when the editor returns both get it (@@HOLDER_REL@@ ms in release). So the binding needs no
+the 3 s asserted; when the editor returns both get it (102 ms in release). So the binding needs no
 always-on server, but data is only as available as the members that hold it are online. An always-on
 member (a peer that is a `Pull` member, which p2panda-spaces does not encrypt for, would hold ciphertext
 and no key) is the way to remove the dependency; **that was not built**.
@@ -343,11 +353,11 @@ Release build, loopback, one process, two nodes (job `measure`):
 
 | What | Result |
 |---|---|
-| QUIC connect + first sync session, direct loopback address, no relay | median **@@CONN_COLD@@ ms** (min @@CONN_MIN@@, max @@CONN_MAX@@, 7 fresh pairs) |
-| a sync session over a connection that is already open | median @@CONN_WARM@@ ms |
-| the same session with relay-only addresses vs direct addresses, same debug build and process | @@RELAY_VIA@@ ms vs @@RELAY_DIRECT@@ ms (not a WAN; see below) |
-| 1 MiB file: writer (seal, store, read back, verify, entry) / iroh-blobs fetch | @@B1_PUB@@ ms / @@B1_FETCH@@ ms = @@B1_MIBS@@ MiB/s |
-| 32 MiB file: writer / iroh-blobs fetch | @@B32_PUB@@ ms / @@B32_FETCH@@ ms = @@B32_MIBS@@ MiB/s; reader decrypt and read @@B32_READ@@ ms |
+| QUIC connect + first sync session, direct loopback address, no relay | median **27.3 ms** (min 23.8, max 31.6, 7 fresh pairs) |
+| a sync session over a connection that is already open | median 6.6 ms |
+| the same session with relay-only addresses vs direct addresses, same debug build and process | 20.9 ms vs 20.5 ms (not a WAN; see below) |
+| 1 MiB file: writer (seal, store, read back, verify, entry) / iroh-blobs fetch | 6 ms / 4 ms = 279 MiB/s |
+| 32 MiB file: writer / iroh-blobs fetch | 176 ms / 59 ms = 538 MiB/s; reader decrypt and read 52 ms |
 | inline update, 34,000 bytes (the DCP maximum): publish / visible at the other node | see below |
 | bytes per operation for a 100-byte inline update | **~2,170** on the wire (marginal, 100 to 1,000 entries) |
 
@@ -356,19 +366,18 @@ processes while the writer publishes):
 
 | N | writer publish | reader complete, after the last publish | persisted p2panda-spaces state at the reader / writer |
 |---|---|---|---|
-| 10 | 24 ms (2.4 ms each) | @@C10@@ ms | 29.7 kB / 2.5 kB |
-| 100 | 248 ms (2.5 ms each) | @@C100@@ ms | 220 kB / 6.1 kB |
-| 300 | 867 ms (2.9 ms each) | @@C300@@ ms | 644 kB / 14.2 kB |
-| 1000 | 4.4 s (4.4 ms each) | @@C1000@@ ms | 2.13 MB / 43.6 kB |
+| 10 | 33 ms (3.3 ms each) | 53 ms | 29.7 kB / 2.5 kB |
+| 100 | 326 ms (3.3 ms each) | 592 ms | 220 kB / 6.1 kB |
+| 300 | 1.08 s (3.6 ms each) | 6,055 ms | 644 kB / 14.2 kB |
+| 1000 | 5.7 s (5.7 ms each) | 81,317 ms | 2.13 MB / 43.6 kB |
 
-The reader's cost per entry grows with the number of entries (6.7 ms, 21 ms and 81 ms per entry at 100,
+The reader's cost per entry grows with the number of entries (5.9 ms, 20 ms and 81 ms per entry at 100,
 300 and 1,000), and the persisted state at the reader grows by about the size of one operation per entry.
 That is p2panda-spaces' orderer holding every message in the state it reads and rewrites per message
-(source above). A late joiner pulling everything in one session: @@LATE100@@ ms for 108 operations (224,510 bytes, about
-2,080 bytes each) and @@LATE300@@ ms for 308 operations. Inline updates therefore stay usable to a few
+(source above). A late joiner pulling everything in one session: 596 ms for 108 operations (224,510 bytes, about
+2,080 bytes each) and 3,942 ms for 308 operations. Inline updates therefore stay usable to a few
 hundred entries per document on this library; the spec's 34,000-byte inline limit was exercised and
-works (publish 1 to 6 ms in release, visible at the other node about 50 ms later, including the 200 ms
-anti-entropy only as a backstop: a publish triggers a sync).
+works (figures in `spike-c-measure/p2p-release.log`; a publish triggers a sync, the 200 ms anti-entropy is a backstop).
 
 **Per-entry overhead.** 2,170 bytes on the wire for 100 bytes of payload. Of that, the JSON body with its
 128-hex signature, the 64-hex heads and the nonce, the AEAD tag, and a CBOR encoding in which cbor-core
@@ -436,7 +445,7 @@ spike):
    binding without a coordinator: two sessions that cannot see each other can both hold it, and both
    pass the two read-backs (measured).
 7. **Lease rule 3's settle interval** is binding specific. Peer-to-peer propagation on loopback was
-   @@L_MED@@ ms median (p95 @@L_P95@@ ms); the value must also cover a lost round (a session every anti-entropy
+   13.8 ms median (p95 16.0 ms); the value must also cover a lost round (a session every anti-entropy
    interval) and has not been measured on a WAN.
 8. **Section 11 "Revocation has limits"** needs the second case: what a member publishes before it
    applies the removal is encrypted to the old key and readable by the removed member. In a binding with no
