@@ -24,6 +24,7 @@ use dcp_core::{graph, updates, Author, DocumentStore, LeaseState, Role, StoreErr
 use dcp_wopi::timefmt::iso8601_ms;
 use serde_json::Value;
 
+use crate::profile;
 use crate::raw::Resp;
 use crate::rig::{Rig, Who};
 
@@ -893,7 +894,7 @@ async fn forge_as_viewer(rig: &Rig) -> Result<Vec<String>, Failure> {
             covers: None,
         };
         let content = serde_json::to_value(&forged).map_err(|e| Failure::new(e.to_string()))?;
-        let sent = viewer.send_unchecked(doc, "org.tunaos.dcp.version", content).await;
+        let sent = profile::send_unchecked_patiently(viewer, doc, "org.tunaos.dcp.version", content).await;
         match (gated, sent) {
             (true, Err(StoreError::Forbidden(_))) => {}
             (true, other) => {
@@ -1044,7 +1045,7 @@ pub async fn forged_update_from_a_viewer_is_dropped_by_readers(rig: &Rig) -> R {
     for seq in 0..2u64 {
         let content = serde_json::to_value(update(seq, b"forged by a viewer", &rig.first)?)
             .map_err(|e| Failure::new(e.to_string()))?;
-        let sent = viewer.send_unchecked(doc, "org.tunaos.dcp.update", content).await;
+        let sent = profile::send_unchecked_patiently(viewer, doc, "org.tunaos.dcp.update", content).await;
         if let Some(id) = expect_server_verdict(gated, "a viewer", "an update", sent)? {
             accepted.push(id);
         }
@@ -1144,14 +1145,14 @@ pub async fn a_demoted_editor_cannot_publish_and_readers_drop_what_slips_through
         gated,
         "a demoted editor",
         "a version",
-        editor.send_unchecked(doc, "org.tunaos.dcp.version", content).await,
+        profile::send_unchecked_patiently(editor, doc, "org.tunaos.dcp.version", content).await,
     )?;
     let content = serde_json::to_value(update(0, b"forged by a demoted editor", &v2.id)?).map_err(|e| Failure::new(e.to_string()))?;
     let forged_u = expect_server_verdict(
         gated,
         "a demoted editor",
         "an update",
-        editor.send_unchecked(doc, "org.tunaos.dcp.update", content).await,
+        profile::send_unchecked_patiently(editor, doc, "org.tunaos.dcp.update", content).await,
     )?;
     let accepted: Vec<String> = forged_v.iter().chain(forged_u.iter()).cloned().collect();
 
@@ -1577,9 +1578,25 @@ pub async fn two_wopi_hosts_racing_for_one_lock_have_one_winner(rig: &Rig) -> R 
                 );
                 println!("OUTSIDE-TOLERANCE two hosts, round {round}: both LOCKs answered 200; their lease writes landed {gap} ms apart (settle interval {MATRIX_SETTLE_MS} ms)");
                 *outcomes.entry("both 200 outside the settle interval").or_default() += 1;
-                // Whoever the room says holds it releases it; the other's string is dead.
+                // The room names one holder. The other host's session believes
+                // it holds the lock too, but the lease record is what every
+                // PutFile is judged against: its save is refused with the
+                // holder's string, and publishes nothing.
                 let l = lease_now(rig, "after the race").await?;
-                let (holder, lock) = if l.body.token.as_deref() == Some(l1.as_str()) { (&on_host1, l1) } else { (&on_host2, l2) };
+                let (holder, lock, other, other_lock) = if l.body.token.as_deref() == Some(l1.as_str()) {
+                    (&on_host1, l1, &on_host2, l2)
+                } else {
+                    (&on_host2, l2, &on_host1, l1)
+                };
+                let before = rig.native(Who::Owner).versions(doc).await?.len();
+                let stale = other.put_file(Some(&other_lock), None, b"saved by the session that lost the lease").await?;
+                status("PutFile by the host whose LOCK also answered 200", &stale, 409)?;
+                ensure!(
+                    stale.lock.as_deref() == Some(lock.as_str()),
+                    "round {round}: the refused PutFile must carry the holder's string {lock:?}, got {:?}",
+                    stale.lock
+                );
+                ensure!(rig.native(Who::Owner).versions(doc).await?.len() == before, "round {round}: the refused PutFile published a version");
                 status("the holder's UNLOCK", &holder.unlock(&lock).await?, 200)?;
             }
             other => {

@@ -29,7 +29,7 @@ pub struct MatrixViewerForger(pub Arc<MatrixStore>);
 impl Forger for MatrixViewerForger {
     async fn forge_version(&self, doc: &DocId, version: Version) -> Result<Option<String>, Failure> {
         let content = serde_json::to_value(&version).map_err(|e| Failure::new(e.to_string()))?;
-        match self.0.send_unchecked(doc, "org.tunaos.dcp.version", content).await {
+        match crate::profile::send_unchecked_patiently(&self.0, doc, "org.tunaos.dcp.version", content).await {
             Ok(id) => Ok(Some(id)),
             Err(StoreError::Forbidden(_)) => Ok(None),
             Err(e) => Err(e.into()),

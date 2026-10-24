@@ -109,6 +109,29 @@ pub async fn drain_message_budget(store: &MatrixStore) -> Result<u32, Failure> {
     Err(Failure::new("draining the message budget: 200 events and still no M_LIMIT_EXCEEDED: is this the default profile?"))
 }
 
+/// `MatrixStore::send_unchecked` (a send around the store's role check, with no
+/// queue) repeated while the homeserver answers with its rate limit. A 429 is
+/// not a verdict on the event: on the default profile Synapse answers it
+/// before it looks at the sender's power level, so a forged event sent by a
+/// user whose budget is spent first gets `M_LIMIT_EXCEEDED`, and only the
+/// retry gets the 403 (or the acceptance) the forgery checks are about.
+pub async fn send_unchecked_patiently(
+    store: &MatrixStore,
+    doc: &dcp_core::DocId,
+    event_type: &str,
+    content: serde_json::Value,
+) -> Result<String, dcp_core::StoreError> {
+    for _ in 0..60 {
+        match store.send_unchecked(doc, event_type, content.clone()).await {
+            Err(dcp_core::StoreError::RateLimited { retry_after_ms }) => {
+                tokio::time::sleep(Duration::from_millis(retry_after_ms.unwrap_or(5_000).clamp(500, 30_000))).await
+            }
+            other => return other,
+        }
+    }
+    Err(dcp_core::StoreError::RateLimited { retry_after_ms: None })
+}
+
 fn is_rate_limited(text: &str) -> bool {
     text.contains("M_LIMIT_EXCEEDED") || text.contains("LimitExceeded") || text.contains("Too Many Requests") || text.contains("429")
 }
