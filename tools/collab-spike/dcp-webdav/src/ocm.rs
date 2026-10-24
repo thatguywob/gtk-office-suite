@@ -55,6 +55,7 @@ struct Inner {
     records: Mutex<Vec<Recorded>>,
     /// `host:port` as the senders must reach it.
     advertised: String,
+    capabilities: Vec<String>,
 }
 
 pub struct OcmReceiver {
@@ -77,11 +78,17 @@ impl OcmReceiver {
     /// Listen on every interface, on a free port. `advertised_host` is the name the
     /// Nextcloud containers resolve to the runner (`dcp-host`).
     pub async fn start(advertised_host: &str) -> std::io::Result<OcmReceiver> {
+        Self::start_advertising(advertised_host, &["notifications"]).await
+    }
+
+    /// As [`Self::start`], advertising these OCM `capabilities` in discovery.
+    pub async fn start_advertising(advertised_host: &str, capabilities: &[&str]) -> std::io::Result<OcmReceiver> {
         let listener = tokio::net::TcpListener::bind("0.0.0.0:0").await?;
         let addr = listener.local_addr()?;
         let inner = Arc::new(Inner {
             records: Mutex::new(Vec::new()),
             advertised: format!("{advertised_host}:{}", addr.port()),
+            capabilities: capabilities.iter().map(|c| (*c).to_owned()).collect(),
         });
         let app = Router::new()
             .fallback(any(handle))
@@ -120,12 +127,12 @@ impl OcmReceiver {
 
     /// The discovery document the receiver serves.
     pub fn discovery(&self) -> Value {
-        discovery(&self.inner.advertised)
+        discovery(&self.inner.advertised, &self.inner.capabilities)
     }
 }
 
-fn discovery(host: &str) -> Value {
-    json!({
+fn discovery(host: &str, capabilities: &[String]) -> Value {
+    let mut d = json!({
         "enabled": true,
         "apiVersion": "1.1.0",
         "endPoint": format!("http://{host}/ocm"),
@@ -135,8 +142,12 @@ fn discovery(host: &str) -> Value {
             "shareTypes": ["user"],
             "protocols": { "webdav": "/public.php/webdav/" }
         }],
-        "capabilities": ["notifications"]
-    })
+        "capabilities": capabilities
+    });
+    if capabilities.iter().any(|c| c == "http-sig") {
+        d["jwksUri"] = json!(format!("http://{host}/ocm/jwks"));
+    }
+    d
 }
 
 fn reply(status: StatusCode, body: Value) -> Response<Body> {
@@ -168,7 +179,7 @@ async fn handle(State(s): State<Arc<Inner>>, req: Request<Body>) -> Response<Bod
     let path = parts.uri.path().trim_end_matches('/').to_owned();
     s.records.lock().push(rec);
     match (parts.method.as_str(), path.as_str()) {
-        ("GET", "/.well-known/ocm") | ("GET", "/ocm-provider") => reply(StatusCode::OK, discovery(&s.advertised)),
+        ("GET", "/.well-known/ocm") | ("GET", "/ocm-provider") => reply(StatusCode::OK, discovery(&s.advertised, &s.capabilities)),
         ("POST", p) if p.ends_with("/ocm/shares") => {
             reply(StatusCode::CREATED, json!({ "recipientDisplayName": "dcp-spike-receiver" }))
         }

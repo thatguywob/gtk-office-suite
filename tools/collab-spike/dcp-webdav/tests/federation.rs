@@ -48,8 +48,13 @@ async fn ocm_discovery_documents() {
     let caps: Vec<&str> = doc["capabilities"].as_array().unwrap().iter().filter_map(Value::as_str).collect();
     measure("ocm_webapp_mode", json!({ "protocols": protocols.keys().collect::<Vec<_>>(), "capabilities": caps, "apiVersion": doc["apiVersion"], "version": doc["version"] }));
     assert!(!protocols.contains_key("webapp") && !protocols.contains_key("webapp-receive"));
-    assert!(!caps.contains(&"exchange-token") && !caps.contains(&"http-sig"));
-    assert!(doc.get("tokenEndPoint").is_none());
+    // What the server offers besides webdav varies with the release: 34 offers
+    // `notifications` and `shares`; 35 adds `exchange-token` and `http-sig`
+    // with a token endpoint and a JWKS. Neither offers `webapp`.
+    measure(
+        "ocm_code_flow_advertised",
+        json!({ "exchange_token": caps.contains(&"exchange-token"), "http_sig": caps.contains(&"http-sig"), "tokenEndPoint": doc.get("tokenEndPoint"), "jwksUri": doc.get("jwksUri") }),
+    );
 }
 
 /// What crosses the wire, and what a secret-holding receiver can do.
@@ -298,4 +303,33 @@ async fn what_a_federated_mount_says_about_the_role() {
         assert_eq!(seen, expect, "granted {role:?}");
     }
     measure("federated_mount_permissions_by_granted_role", json!(rows));
+}
+
+/// A receiver that says it can verify HTTP message signatures and honour the code
+/// flow: does the sender change what it sends?
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_receiver_that_advertises_the_newer_capabilities() {
+    if require("a_receiver_that_advertises_the_newer_capabilities", &[url_a()]).await.is_none() {
+        return;
+    }
+    let base = url_a();
+    let clock = clock(&base).await;
+    let fault = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let alice = store(&base, "alice", &clock, &fault);
+    let recv = OcmReceiver::start_advertising("dcp-host", &["notifications", "exchange-token", "http-sig"]).await.unwrap();
+    let doc = alice.create_document(&standard_meta(), Some(new_file(BASE_FILE))).await.unwrap();
+    alice.grant(&doc, &format!("dave@{}", recv.host()), Role::Viewer).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    let shares = recv.shares();
+    assert!(!shares.is_empty(), "{:#?}", recv.records());
+    let s = &shares[0];
+    measure(
+        "share_notification_to_a_receiver_that_advertises_http_sig_and_exchange_token",
+        json!({
+            "signature_header": s.recorded.header("signature").map(|v| v.split("signature=").next().unwrap_or("").to_owned()),
+            "signature_input_header": s.recorded.header("signature-input"),
+            "content_digest": s.recorded.header("content-digest").is_some(),
+            "protocol": s.body["protocol"],
+        }),
+    );
 }

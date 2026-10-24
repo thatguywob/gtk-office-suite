@@ -32,8 +32,8 @@ env:
   CARGO_PROFILE_DEV_DEBUG: line-tables-only
   CARGO_PROFILE_TEST_DEBUG: line-tables-only
   CARGO_INCREMENTAL: 0
-  # Pinned by tag and digest (docker hub, 2026-10-24). Surfaced into the results document.
-  NEXTCLOUD_IMAGE: docker.io/library/nextcloud:34.0.5-apache@sha256:1f9212adecae32010cdbf137d7e0db78d08c696dc3e77f1eddcbf902d10209b4
+  # Pinned by tag and digest (docker hub, 2026-10-24); the images under test are the
+  # matrix entries of each job. Surfaced into the results document.
   POSTGRES_IMAGE: docker.io/library/postgres:16-alpine@sha256:f4610795587492cd4fb887c2dc3de301b813278bb6f616992061141b5f15ac36
 
 permissions:
@@ -41,9 +41,19 @@ permissions:
 
 jobs:
   probe:
-    name: protocol probe (two Nextcloud instances)
+    name: protocol probe (two Nextcloud ${{ matrix.version }} instances)
     runs-on: ubuntu-24.04
     timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - version: '34.0.5'
+            image: docker.io/library/nextcloud:34.0.5-apache@sha256:1f9212adecae32010cdbf137d7e0db78d08c696dc3e77f1eddcbf902d10209b4
+          - version: '35.0.2'
+            image: docker.io/library/nextcloud:35.0.2-apache@sha256:89af7ee7a96ff5e9668280566209268ae6b2d02327f6ef6d56f6d68228cf9431
+    env:
+      NEXTCLOUD_IMAGE: ${{ matrix.image }}
     defaults:
       run:
         working-directory: tools/collab-spike
@@ -77,7 +87,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
-          name: nextcloud-probe
+          name: nextcloud-probe-${{ matrix.version }}
           path: measurements/
           if-no-files-found: warn
 

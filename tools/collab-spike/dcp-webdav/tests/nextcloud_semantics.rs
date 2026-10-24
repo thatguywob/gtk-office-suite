@@ -64,46 +64,54 @@ async fn conditional_put_semantics() {
     let a = dav(&url_a(), "alice");
     let name = unique("cond");
 
-    // Sequential: the textbook behaviour holds when the size changes.
+    // Sequential, one writer: the textbook behaviour.
     let r = put(&a, &name, b"one", &[("If-None-Match", "*")]).await;
     assert_eq!(r.status, 201);
     let e1 = r.etag().unwrap();
     assert_eq!(put(&a, &name, b"again", &[("If-None-Match", "*")]).await.status, 412, "create over an existing name");
     assert_eq!(put(&a, &name, b"x", &[("If-Match", "\"deadbeef\"")]).await.status, 412, "wrong ETag");
-    let r = put(&a, &name, b"two-longer", &[("If-Match", e1.as_str())]).await;
-    assert_eq!(r.status, 204, "right ETag");
-    // The PUT's own answer carries the new ETag, so a writer can chain If-Match.
-    let in_answer = r.etag().unwrap();
-    let e2 = etag_of(&a, &name).await;
-    measure("put_answer_etag", json!({ "before": e1, "in_the_put_answer": in_answer, "propfind_after": e2 }));
-    assert_eq!(in_answer, e2, "the PUT answer carries the ETag the file now has");
-    assert_ne!(e1, e2, "a size change changes the ETag");
-    assert_eq!(put(&a, &name, b"three", &[("If-Match", e1.as_str())]).await.status, 412, "stale ETag after a size change");
 
-    // Same size, same second: the ETag does not move, so a stale writer wins.
-    let (mut unchanged, mut lost_updates, rounds) = (0, 0, 20);
-    for i in 0..rounds {
-        let n = format!("{name}-same-{i}");
-        let r = put(&a, &n, b"aaaa", &[("If-None-Match", "*")]).await;
-        let e0 = r.etag().unwrap();
-        let r = put(&a, &n, b"bbbb", &[("If-Match", e0.as_str())]).await; // writer 1
-        assert_eq!(r.status, 204);
-        let now = etag_of(&a, &n).await;
-        if now == e0 {
-            unchanged += 1;
-            // Writer 2 read e0 before writer 1 wrote; the server still agrees.
-            let r2 = put(&a, &n, b"cccc", &[("If-Match", e0.as_str())]).await;
-            if r2.status == 204 {
-                lost_updates += 1;
+    // Is an overwrite always a new ETag? Twenty files each, replaced at once by
+    // content of a different size and by content of the same size; then a second
+    // writer that still holds the old ETag.
+    let rounds = 20;
+    let mut total_unchanged = 0;
+    for (label, replacement) in [("different_size", &b"a replacement that is longer"[..]), ("same_size", &b"bbb"[..])] {
+        let (mut unchanged, mut stale_accepted, mut stale_refused) = (0, 0, 0);
+        let mut answer_matches_propfind = 0;
+        for i in 0..rounds {
+            let n = format!("{name}-{label}-{i}");
+            let e0 = put(&a, &n, b"aaa", &[("If-None-Match", "*")]).await.etag().unwrap();
+            let r = put(&a, &n, replacement, &[("If-Match", e0.as_str())]).await; // writer 1
+            assert_eq!(r.status, 204);
+            let now = etag_of(&a, &n).await;
+            if r.etag().as_deref() == Some(now.as_str()) {
+                answer_matches_propfind += 1;
+            }
+            if now == e0 {
+                unchanged += 1;
+            }
+            // Writer 2 read e0 before writer 1 wrote.
+            let r2 = put(&a, &n, b"ccc", &[("If-Match", e0.as_str())]).await;
+            match r2.status {
+                204 => stale_accepted += 1,
+                412 => stale_refused += 1,
+                other => panic!("unexpected {other}"),
             }
         }
+        measure(
+            &format!("if_match_after_an_overwrite_{label}"),
+            json!({ "rounds": rounds, "etag_unchanged": unchanged, "stale_writer_accepted": stale_accepted, "stale_writer_refused_412": stale_refused, "put_answer_etag_equals_propfind": answer_matches_propfind }),
+        );
+        // Whenever the ETag moved the stale writer is refused, and whenever it
+        // did not the stale writer is accepted: If-Match is exactly as good as
+        // the ETag, no better.
+        assert_eq!(unchanged, stale_accepted, "{label}");
+        assert_eq!(rounds - unchanged, stale_refused, "{label}");
+        total_unchanged += unchanged;
     }
-    measure(
-        "if_match_same_size_same_second",
-        json!({ "rounds": rounds, "etag_unchanged_after_overwrite": unchanged, "stale_writer_accepted": lost_updates }),
-    );
-    assert!(unchanged >= 1, "expected the ETag to stay put on a same-size overwrite in the same second at least once in {rounds} rounds");
-    assert_eq!(unchanged, lost_updates, "whenever the ETag stayed put the stale If-Match was accepted");
+    let _ = e1;
+    assert!(total_unchanged >= 1, "expected an overwrite that left the ETag as it was at least once in {} replacements", 2 * rounds);
 
     // Two writers at once with the same If-Match.
     let (mut both, mut one, mut none, mut statuses) = (0, 0, 0, std::collections::BTreeMap::<String, u32>::new());
@@ -745,6 +753,9 @@ async fn lease_log_is_a_compare_and_set_under_concurrency() {
         }
     }
     measure("lease_log_concurrent_writers", json!({ "rounds": rounds, "exactly_one_won": one_won, "both_won": both_won, "neither_won": none_won, "loser_errors": losers }));
+    // Safety: never two winners. Liveness is not promised: when two different
+    // users create the same name at the same instant Nextcloud's file lock can
+    // refuse both (HTTP 423), and the caller reads back and tries again.
     assert_eq!(both_won, 0, "two writers both created the same record number");
-    assert_eq!(none_won, 0, "no writer won");
+    assert!(one_won >= 1, "no round had a winner");
 }

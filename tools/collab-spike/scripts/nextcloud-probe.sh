@@ -9,7 +9,7 @@
 #   PROBE_OUT=measurements/probe scripts/nextcloud-probe.sh [section...]
 #
 # Sections: server etag etagsame races checksum truncated versions props lock
-#           sharing activity time ocm ocmrecv nolockapp
+#           sharing activity time ocm ocmrecv office nolockapp
 set -uo pipefail
 
 PW="${DCP_NC_USER_PASSWORD:-dcp-user-Passw0rd-spike}"
@@ -247,6 +247,29 @@ section_lock() {
   req ul-lock alice "$A" LOCK $f -H 'X-User-Lock: 1' -H 'Content-Type: application/xml' --data "$LOCKINFO"
   req ul-propfind alice "$A" PROPFIND $f -H 'Depth: 0' --data "$PF_NAMED"
   req ul-unlock alice "$A" UNLOCK $f -H 'X-User-Lock: 1'
+}
+
+section_office() {
+  echo; echo "##### Nextcloud Office (richdocuments) and Collabora: what the image ships, and whether it can be added"
+  occ a app:list --output=json | python3 -c "
+import json,sys
+d=json.load(sys.stdin)
+for k in ('enabled','disabled'):
+    print(k, [a for a in sorted(d[k]) if any(w in a for w in ('office','richdocuments','collabora','text','onlyoffice','files_lock','viewer'))])"
+  occ a app:install richdocuments
+  occ a app:list --output=json | python3 -c "
+import json,sys
+d=json.load(sys.stdin)
+print('richdocuments enabled:', 'richdocuments' in d['enabled'], d['enabled'].get('richdocuments'))"
+  occ a config:app:get richdocuments wopi_url
+  req office-capabilities alice "$A" GET '/ocs/v2.php/cloud/capabilities?format=json'
+  python3 -c "
+import json
+c=json.load(open('$BODY'))['ocs']['data']['capabilities']
+print('richdocuments capability:', json.dumps(c.get('richdocuments'), sort_keys=True)[:600])
+print('files.directEditing:', json.dumps(c.get('files',{}).get('directEditing'), sort_keys=True)[:300])"
+  req office-directediting alice "$A" GET '/ocs/v2.php/apps/files/api/v1/directEditing'
+  occ a app:disable richdocuments
 }
 
 section_nolockapp() {
@@ -498,7 +521,7 @@ section_ocm() {
 }
 
 sections=("$@")
-[ "${#sections[@]}" -gt 0 ] || sections=(server etag etagsame races checksum truncated versions props lock sharing activity time ocm ocmrecv nolockapp)
+[ "${#sections[@]}" -gt 0 ] || sections=(server etag etagsame races checksum truncated versions props lock sharing activity time ocm ocmrecv office nolockapp)
 for s in "${sections[@]}"; do
   "section_$s" 2>&1 | tee -a "$OUT/probe-$s.log"
 done
