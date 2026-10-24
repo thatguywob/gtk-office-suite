@@ -1,0 +1,73 @@
+name: collab-spike-e
+
+# RFC-0004 Spike E: the OCM and WebDAV binding measured against real Nextcloud
+# (two instances on one docker network). Not part of the product CI.
+#
+#   probe   raw protocol probe (scripts/nextcloud-probe.sh): every request and
+#           response is in the log and in the `nextcloud-probe` artifact
+#
+# Results and what is not verified: docs/rfc/0004-spike-e-results.md
+#
+# A test that needs Nextcloud FAILS when it is missing; only DCP_SKIP_NEXTCLOUD=1
+# skips it, and the test says so.
+on:
+  push:
+    branches: [spike/collab-e]
+    paths:
+      - 'tools/collab-spike/**'
+      - '.github/workflows/collab-spike-e.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: collab-spike-e-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  CARGO_PROFILE_TEST_DEBUG: line-tables-only
+  CARGO_INCREMENTAL: 0
+  # Pinned by tag and digest (docker hub, 2026-10-24). Surfaced into the results document.
+  NEXTCLOUD_IMAGE: docker.io/library/nextcloud:34.0.5-apache@sha256:1f9212adecae32010cdbf137d7e0db78d08c696dc3e77f1eddcbf902d10209b4
+  POSTGRES_IMAGE: docker.io/library/postgres:16-alpine@sha256:f4610795587492cd4fb887c2dc3de301b813278bb6f616992061141b5f15ac36
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    name: protocol probe (two Nextcloud instances)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: tools/collab-spike
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Versions
+        run: |
+          docker --version
+          echo "$NEXTCLOUD_IMAGE"
+          echo "$POSTGRES_IMAGE"
+      - name: Start two Nextcloud instances
+        run: scripts/nextcloud-up.sh a b 2>&1 | tee "$RUNNER_TEMP/up.log"
+      - name: Probe
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/measurements"
+          PROBE_OUT="$GITHUB_WORKSPACE/measurements/probe" scripts/nextcloud-probe.sh 2>&1 | tee "$GITHUB_WORKSPACE/measurements/probe.log"
+      - name: Container logs
+        if: always()
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/measurements"
+          for c in nc-a nc-b; do
+            docker logs "$c" > "$GITHUB_WORKSPACE/measurements/$c.docker.log" 2>&1 || true
+            docker exec "$c" cat /var/www/html/data/nextcloud.log > "$GITHUB_WORKSPACE/measurements/$c.nextcloud.log" 2>&1 || true
+          done
+          cp "$RUNNER_TEMP/up.log" "$GITHUB_WORKSPACE/measurements/up.log" || true
+      - name: Upload measurements
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: nextcloud-probe
+          path: measurements/
+          if-no-files-found: warn
