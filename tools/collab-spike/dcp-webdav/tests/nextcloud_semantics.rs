@@ -759,3 +759,61 @@ async fn lease_log_is_a_compare_and_set_under_concurrency() {
     assert_eq!(both_won, 0, "two writers both created the same record number");
     assert!(one_won >= 1, "no round had a winner");
 }
+
+// ----------------------------------------------------- forged authorship
+
+/// An editor can write a version object that says `created_by` is the owner; the
+/// server accepts it and nothing in WebDAV says otherwise. The Activity app does.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_editor_can_claim_to_be_the_owner() {
+    use dcp_conformance::{new_file, standard_meta};
+    use dcp_core::{Author, DocumentStore, Role};
+    if require("an_editor_can_claim_to_be_the_owner", &[url_a()]).await.is_none() {
+        return;
+    }
+    let base = url_a();
+    let clock = clock(&base).await;
+    let fault = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let owner = store(&base, "alice", &clock, &fault);
+    let editor = store(&base, "bob", &clock, &fault);
+    let doc = owner.create_document(&standard_meta(), Some(new_file(b"base"))).await.unwrap();
+    owner.grant(&doc, &editor.principal(), Role::Editor).await.unwrap();
+    let first = owner.versions(&doc).await.unwrap().remove(0);
+
+    let mut forged = first.body.clone();
+    forged.parents = vec![first.id.clone()];
+    forged.created_by = Author { principal: owner.principal(), device: "alice-device".into() };
+    forged.message = Some("written by bob, signed alice".into());
+    let name = unique("forged");
+    let accepted = editor.put_raw_version(&doc, &name, &forged).await.unwrap();
+    assert_eq!(accepted.as_deref(), Some(name.as_str()), "the server accepted an editor's version that names the owner");
+
+    let listed = owner.versions(&doc).await.unwrap();
+    let v = listed.iter().find(|v| v.id == name).expect("the forged version is listed");
+    assert_eq!(v.sender, owner.principal(), "the store reports the author the object claims");
+
+    // What the server knows: who created the file.
+    let a = dav(&base, "alice");
+    let (_, e) = a
+        .propfind(&a.files_path(&format!("{doc}.v/{name}.json")), 0, &["oc:fileid", "oc:owner-id"])
+        .await
+        .unwrap();
+    let fid = e[0].get(OC, "fileid").unwrap().to_owned();
+    let t0 = Instant::now();
+    let mut creator = None;
+    while t0.elapsed() < Duration::from_secs(20) {
+        let q = format!("apps/activity/api/v2/activity/filter?object_type=files&object_id={fid}&limit=10");
+        if let Ok(data) = a.ocs("GET", &q, &[]).await {
+            if let Some(x) = data.as_array().and_then(|a| a.iter().find(|x| x["type"] == "file_created")) {
+                creator = x["user"].as_str().map(str::to_owned);
+                break;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    measure(
+        "forged_created_by",
+        json!({ "claimed": v.sender, "webdav_owner_id": e[0].get(OC, "owner-id"), "activity_says_created_by": creator }),
+    );
+    assert_eq!(creator.as_deref(), Some("bob"), "the Activity API names the real writer");
+}

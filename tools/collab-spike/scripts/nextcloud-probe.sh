@@ -41,6 +41,16 @@ hdr() { sed 's/\r$//' "$H" | grep -i "^$1:" | tail -1 | sed 's/^[^:]*: *//'; }
 # jget EXPR: a field of the last JSON body
 jget() { python3 -c "import json,sys; d=json.load(open('$BODY')); print($1)" 2>/dev/null; }
 occ() { local inst="$1"; shift; docker exec -u www-data "nc-$inst" php occ "$@" 2>&1; }
+# A change made with occ is not seen by the running web server until it restarts:
+# the enabled-apps list is cached in the server's own memory (APCu).
+restart_nc() {
+  docker restart "nc-$1" >/dev/null
+  for i in $(seq 1 60); do
+    curl -fsS "http://nc-$1/status.php" 2>/dev/null | grep -q '"installed":true' && return 0
+    sleep 2
+  done
+  echo "nc-$1 did not come back" >&2
+}
 
 PF_ALL='<?xml version="1.0"?><d:propfind xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns" xmlns:nc="http://nextcloud.org/ns"><d:allprop/></d:propfind>'
 PF_NAMED='<?xml version="1.0"?><d:propfind xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns" xmlns:nc="http://nextcloud.org/ns"><d:prop><d:getetag/><d:getlastmodified/><d:getcontentlength/><oc:fileid/><oc:id/><oc:permissions/><oc:owner-id/><oc:checksums/><nc:share-permissions/><nc:share-attributes/><oc:share-types/><nc:is-mount-root/><nc:mount-type/><nc:creation_time/><nc:upload_time/><nc:lock/><nc:lock-owner-type/><nc:lock-owner/><nc:lock-owner-displayname/><nc:lock-owner-editor/><nc:lock-time/><nc:lock-timeout/><nc:lock-token/><d:lockdiscovery/><d:supportedlock/><nc:version-label/><nc:version-author/></d:prop></d:propfind>'
@@ -256,6 +266,10 @@ import json,sys
 d=json.load(sys.stdin)
 for k in ('enabled','disabled'):
     print(k, [a for a in sorted(d[k]) if any(w in a for w in ('office','richdocuments','collabora','text','onlyoffice','files_lock','viewer'))])"
+  for app in office richdocuments; do
+    echo "--- apps/$app/appinfo/info.xml"
+    docker exec nc-a sh -c "grep -m6 '<name>\\|<summary>\\|<description\\|<version>\\|<dependencies>\\|<nextcloud ' /var/www/html/apps/$app/appinfo/info.xml 2>/dev/null || echo '(not present in the image)'"
+  done
   occ a app:install richdocuments
   occ a app:list --output=json | python3 -c "
 import json,sys
@@ -275,6 +289,7 @@ print('files.directEditing:', json.dumps(c.get('files',{}).get('directEditing'),
 section_nolockapp() {
   echo; echo "##### files_lock DISABLED (occ app:disable files_lock): core locking only"
   occ a app:disable files_lock
+  restart_nc a
   occ a app:list --output=json | python3 -c "import json,sys; d=json.load(sys.stdin); print('files_lock enabled:', 'files_lock' in d['enabled'])"
   req nolock-options alice "$A" OPTIONS /remote.php/dav/files/alice/
   req nolock-capabilities alice "$A" GET '/ocs/v2.php/cloud/capabilities?format=json'
@@ -287,6 +302,7 @@ print('files capability:', json.dumps({k:v for k,v in d.get('files',{}).items() 
   req nolock-ul-put alice "$A" PUT $f --data-binary 'x'
   req nolock-ul-lock alice "$A" LOCK $f -H 'X-User-Lock: 1' -H 'Content-Type: application/xml' --data "$LOCKINFO"
   occ a app:enable files_lock
+  restart_nc a
 }
 
 section_etagsame() {
