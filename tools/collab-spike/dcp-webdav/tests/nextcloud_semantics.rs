@@ -72,7 +72,11 @@ async fn conditional_put_semantics() {
     assert_eq!(put(&a, &name, b"x", &[("If-Match", "\"deadbeef\"")]).await.status, 412, "wrong ETag");
     let r = put(&a, &name, b"two-longer", &[("If-Match", e1.as_str())]).await;
     assert_eq!(r.status, 204, "right ETag");
-    let e2 = r.etag().unwrap();
+    // The ETag in the PUT's own answer is the one from before the write.
+    let in_answer = r.etag().unwrap();
+    let e2 = etag_of(&a, &name).await;
+    measure("put_answer_etag", json!({ "before": e1, "in_the_put_answer": in_answer, "propfind_after": e2 }));
+    assert_eq!(in_answer, e1, "the PUT answer carries the previous ETag");
     assert_ne!(e1, e2, "a size change changes the ETag");
     assert_eq!(put(&a, &name, b"three", &[("If-Match", e1.as_str())]).await.status, 412, "stale ETag after a size change");
 
@@ -604,7 +608,21 @@ async fn latency_of_the_operations_a_binding_uses() {
     }
     samples("webdav_put_1kib", put_small);
     samples("webdav_get_1kib", get_small);
-    samples("webdav_propfind_depth0", propfind);
+    samples("webdav_propfind_depth0_authenticated_as_the_tests_do", propfind);
+    // The same request with the account password instead of an app password.
+    let slow = Dav::new(&base, "alice", &password());
+    let mut with_password = Vec::new();
+    for _ in 0..n {
+        let (r, _) = slow.propfind(&slow.files_path(""), 0, &["d:getetag"]).await.unwrap();
+        with_password.push(ms(r.elapsed));
+    }
+    samples("webdav_propfind_depth0_with_the_account_password", with_password);
+    let mut unauthenticated = Vec::new();
+    for _ in 0..n {
+        let r = a.request("GET", "/status.php", &[], None).await.unwrap();
+        unauthenticated.push(ms(r.elapsed));
+    }
+    samples("status_php_get", unauthenticated);
     for _ in 0..5 {
         let t = Instant::now();
         let doc = owner.create_document(&standard_meta(), Some(new_file(b"base"))).await.unwrap();

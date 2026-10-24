@@ -231,10 +231,69 @@ async fn locks_do_not_cross_a_federation() {
     let bob_put = b.request("PUT", &b.files_path(&rel), &[], Some(b"{\"bob\":1}".to_vec())).await.unwrap();
     measure("lock_taken_on_the_sender", json!({ "lock_status": lock.status, "receiver_put_status": bob_put.status }));
     assert_eq!(lock.status, 200);
-    assert_eq!(bob_put.status, 423, "the sender's lock does stop a write that arrives through the federation");
+    assert!(matches!(bob_put.status, 204 | 201), "a write that arrives through the federation ignores the sender's Sabre lock: {}", bob_put.status);
+    let tok = lock.header("lock-token").unwrap_or("").to_owned();
+    let _ = a.request("UNLOCK", &a.files_path(&rel), &[("Lock-Token", tok.as_str())], None).await;
+
+    // The files_lock "user lock" (X-User-Lock) instead of a Sabre lock.
+    let ul = a
+        .request("LOCK", &a.files_path(&rel), &[("X-User-Lock", "1"), ("Content-Type", "application/xml")], Some(LOCKINFO.into()))
+        .await
+        .unwrap();
+    let bob_put2 = b.request("PUT", &b.files_path(&rel), &[], Some(b"{\"bob\":2}".to_vec())).await.unwrap();
+    let local_put = dav(&url_a(), "bob").request("PUT", &dav(&url_a(), "bob").files_path(&rel), &[], Some(b"{\"bob\":3}".to_vec())).await.unwrap();
+    measure("user_lock_on_the_sender", json!({ "lock_status": ul.status, "receiver_put_status": bob_put2.status, "local_user_put_status_for_comparison": local_put.status }));
+    let _ = a.request("UNLOCK", &a.files_path(&rel), &[("X-User-Lock", "1")], None).await;
 
     // And the version history of the federated file: not offered to the receiver.
     let fid = a.request("HEAD", &a.files_path(&rel), &[], None).await.unwrap().header("oc-fileid").unwrap_or("").to_owned();
     let v = b.request("PROPFIND", &format!("/remote.php/dav/versions/bob/versions/{fid}"), &[("Depth", "1")], None).await.unwrap();
     measure("versions_endpoint_for_a_federated_file", json!({ "status": v.status }));
+}
+
+/// What the receiving server tells a receiver about its role.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn what_a_federated_mount_says_about_the_role() {
+    if require("what_a_federated_mount_says_about_the_role", &[url_a(), url_b()]).await.is_none() {
+        return;
+    }
+    let clock_a = clock(&url_a()).await;
+    let fault = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let alice = store(&url_a(), "alice", &clock_a, &fault);
+    let bob_b = store(&url_b(), "bob", &clock(&url_b()).await, &fault);
+    let doc = alice.create_document(&standard_meta(), Some(new_file(BASE_FILE))).await.unwrap();
+    let who = bob_b.principal();
+    let mut rows = Vec::new();
+    for (i, role) in [Role::Viewer, Role::Editor, Role::Owner, Role::Viewer].into_iter().enumerate() {
+        alice.grant(&doc, &who, role).await.unwrap();
+        if i == 0 {
+            assert_eq!(accept_pending_remote_shares(bob_b.dav(), &doc).await.unwrap(), 2);
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let mut row = json!({ "granted": format!("{role:?}") });
+        for dir in ["v", "l"] {
+            let (_, e) = bob_b
+                .dav()
+                .propfind(
+                    &bob_b.dav().files_path(&format!("{doc}.{dir}/")),
+                    0,
+                    &["oc:permissions", "oc:owner-id", "nc:mount-type", "nc:is-mount-root", "oc:share-types", "ocm:share-permissions"],
+                )
+                .await
+                .unwrap();
+            row[dir] = json!({
+                "oc_permissions": e[0].get("http://owncloud.org/ns", "permissions"),
+                "owner_id": e[0].get("http://owncloud.org/ns", "owner-id"),
+                "mount_type": e[0].get("http://nextcloud.org/ns", "mount-type"),
+                "ocm_share_permissions": e[0].get("http://open-cloud-mesh.org/ns", "share-permissions"),
+            });
+        }
+        let remote = bob_b.dav().ocs("GET", "apps/files_sharing/api/v1/remote_shares", &[]).await.unwrap();
+        row["remote_shares_on_the_receiver"] = json!(remote
+            .as_array()
+            .map(|a| a.iter().filter(|s| s["name"].as_str().is_some_and(|n| n.contains(&doc))).map(|s| json!({ "name": s["name"], "permissions": s["permissions"], "accepted": s["accepted"] })).collect::<Vec<_>>()));
+        row["role_as_the_store_reads_it"] = json!(format!("{:?}", bob_b.role(&doc).await.unwrap()));
+        rows.push(row);
+    }
+    measure("federated_mount_permissions_by_granted_role", json!(rows));
 }

@@ -44,9 +44,13 @@ impl Entry {
         percent_decode(seg)
     }
 
+    /// A collection: its `resourcetype` says so, or (when that was not asked
+    /// for) its `href` ends with a slash, which Nextcloud does for collections.
     pub fn is_collection(&self) -> bool {
-        self.get(DAV, "resourcetype")
-            .is_some_and(|t| t.contains("collection"))
+        self.href.ends_with('/')
+            || self
+                .get(DAV, "resourcetype")
+                .is_some_and(|t| t.contains("collection"))
     }
 }
 

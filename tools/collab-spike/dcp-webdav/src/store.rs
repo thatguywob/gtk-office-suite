@@ -118,6 +118,18 @@ fn check_doc(doc: &str) -> Result<()> {
     }
 }
 
+/// A refused WRITE. Nextcloud answers `404` to a user whose share was removed,
+/// the same as for a name that never existed, so for a write to a document the
+/// caller already has an id for it is a refusal, not a missing document.
+fn write_error(what: &str, r: &crate::dav::Resp) -> StoreError {
+    if r.status == 404 {
+        return StoreError::Forbidden(format!(
+            "{what}: HTTP 404 (Nextcloud hides a document from a user who has no share of it)"
+        ));
+    }
+    status_error(what, r)
+}
+
 /// (share permissions of `.v`, of `.l`) for a role.
 pub fn share_permissions(role: Role) -> Option<(u32, u32)> {
     match role {
@@ -306,7 +318,7 @@ impl WebdavStore {
         let r = self.dav.put_new(&format!("{}/{name}.json", v_dir(doc)), body).await?;
         match r.status {
             201 | 204 => Ok(Some(name.to_owned())),
-            401 | 403 => Ok(None),
+            401 | 403 | 404 => Ok(None),
             _ => Err(status_error("raw version", &r)),
         }
     }
@@ -543,7 +555,7 @@ impl DocumentStore for WebdavStore {
         }
         let r = self.dav.put_new(&format!("{dir}/{id}.bin"), sent).await?;
         if !r.ok() {
-            return Err(status_error("upload", &r));
+            return Err(write_error("upload", &r));
         }
 
         // 2. Verify that the stored bytes are the bytes (version rule 2). The
@@ -584,7 +596,7 @@ impl DocumentStore for WebdavStore {
         let body = serde_json::to_vec(&version).map_err(|e| StoreError::Invalid(e.to_string()))?;
         let r = self.dav.put_new(&format!("{dir}/{id}.json"), body).await?;
         if !r.ok() {
-            return Err(status_error("publish the version", &r));
+            return Err(write_error("publish the version", &r));
         }
         let ts = r.server_time_ms().unwrap_or_else(|| self.clock.now_ms());
         Ok(Stamped::new(id, ts, self.principal(), version).with_device(self.device()))
@@ -631,7 +643,7 @@ impl DocumentStore for WebdavStore {
                 "lease record {next} was taken first (HTTP {})",
                 r.status
             ))),
-            _ => Err(status_error("write the lease", &r)),
+            _ => Err(write_error("write the lease", &r)),
         }
     }
 

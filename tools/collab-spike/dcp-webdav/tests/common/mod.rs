@@ -24,6 +24,48 @@ pub fn password() -> String {
     std::env::var("DCP_NC_USER_PASSWORD").unwrap_or_else(|_| PASSWORD.into())
 }
 
+static TOKENS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, String>>> =
+    std::sync::OnceLock::new();
+
+fn tokens() -> &'static std::sync::Mutex<std::collections::HashMap<String, String>> {
+    TOKENS.get_or_init(Default::default)
+}
+
+/// Every request with the account password makes Nextcloud verify it with a slow
+/// password hash, about 200 ms. An app password is checked against a token and is
+/// the way a client is meant to authenticate; the tests use one per user.
+/// `DCP_NC_NO_APP_PASSWORDS=1` keeps the account password (the latency test
+/// measures both).
+pub async fn prime_app_passwords(base: &str) {
+    if std::env::var("DCP_NC_NO_APP_PASSWORDS").as_deref() == Ok("1") {
+        return;
+    }
+    for user in ["alice", "bob", "carol", "dave"] {
+        let key = format!("{base}|{user}");
+        if tokens().lock().unwrap().contains_key(&key) {
+            continue;
+        }
+        let d = Dav::new(base, user, &password());
+        match d.ocs("GET", "core/getapppassword", &[]).await {
+            Ok(v) => {
+                if let Some(t) = v["apppassword"].as_str() {
+                    tokens().lock().unwrap().insert(key, t.to_owned());
+                }
+            }
+            Err(e) => println!("no app password for {user}@{base}: {e}"),
+        }
+    }
+}
+
+pub fn password_for(base: &str, user: &str) -> String {
+    tokens()
+        .lock()
+        .unwrap()
+        .get(&format!("{base}|{user}"))
+        .cloned()
+        .unwrap_or_else(password)
+}
+
 /// `Some(())` if the test should run. With `DCP_SKIP_NEXTCLOUD=1` it prints
 /// `SKIPPED <name>` and returns `None`. Otherwise it panics if `base` does not
 /// answer `status.php` with `"installed":true`.
@@ -43,18 +85,21 @@ pub async fn require(name: &str, bases: &[String]) -> Option<()> {
             "Nextcloud is not reachable at {base} (start it with scripts/nextcloud-up.sh, or set DCP_SKIP_NEXTCLOUD=1 to skip {name} explicitly)"
         );
     }
+    for base in bases {
+        prime_app_passwords(base).await;
+    }
     Some(())
 }
 
 pub fn dav(base: &str, user: &str) -> Dav {
-    Dav::new(base, user, &password())
+    Dav::new(base, user, &password_for(base, user))
 }
 
 pub fn config(base: &str, user: &str) -> WebdavConfig {
     WebdavConfig {
         base_url: base.to_owned(),
         user: user.to_owned(),
-        password: password(),
+        password: password_for(base, user),
         device: format!("{user}-device"),
         remote_scheme: "http".into(),
     }
