@@ -18,6 +18,13 @@
 //! with Collabora's own defaults and with tightened timers); its effective
 //! values are printed by the workflow, and `DCP_CHURN_LABEL` names the run.
 //!
+//! `DCP_CHURN_STRESS=1` is for a Collabora configured to save far more often
+//! than its own defaults, to find where Synapse's limit starts to bite: the
+//! session is then measured, not required to finish cleanly (what happened to
+//! the lease, the PutFiles and the last typed text is printed as
+//! `CHURN OUTCOME`), because an overloaded session failing is a result. Only
+//! the consistency of the counting itself is still asserted.
+//!
 //! Needs both services like `collabora_over_matrix.rs` (and `--test-threads=1`).
 //! Meaningful on the default Synapse profile; it runs, and says which profile
 //! it ran on, on either.
@@ -107,6 +114,7 @@ async fn a_scripted_collabora_session_and_the_homeservers_event_limits() {
     let every = env_u64("DCP_CHURN_TYPE_EVERY_SECS", 5);
     let tail = env_u64("DCP_CHURN_TAIL_SECS", 90);
     let label = std::env::var("DCP_CHURN_LABEL").unwrap_or_else(|_| "unlabelled".into());
+    let stress = std::env::var("DCP_CHURN_STRESS").as_deref() == Ok("1");
     let rig = Rig::new(&syn, RigOptions::honest().for_collabora(e.host_port, base_odt)).await.expect("rig");
     let owner = rig.native(Who::Owner);
     let editor_store = rig.handles.editor.clone();
@@ -209,13 +217,27 @@ async fn a_scripted_collabora_session_and_the_homeservers_event_limits() {
     let window_secs = (t1 - t0) as f64 / 1000.0;
     let budget = 10.0 + 0.2 * window_secs;
     let versions = rig.native(Who::Owner).versions(&rig.doc).await.expect("versions").len();
-    let lease = owner.lease(&rig.doc).await.expect("lease");
+    let lease = owner.lease(&rig.doc).await;
 
     println!("CHURN window: {window_secs:.0} s from the start of the Collabora load (opened after {:.1} s, typing ended at +{:.0} s, UNLOCK {} after the close); typed {typed} times", opened_after.as_secs_f64(), (typing_ended_ms - t0) as f64 / 1000.0, unlock_after.map_or("never seen".into(), |d| format!("{:.1} s", d.as_secs_f64())));
     println!("CHURN events per minute (state = lease records, timeline = encrypted versions/updates):");
     for (i, (st, tl)) in per_minute.iter().enumerate() {
         println!("CHURN   minute {i}: {:>3} state + {:>3} timeline = {:>3}", st, tl, st + tl);
     }
+    // When each event landed, seconds after the start of the load: the cadence.
+    let offsets: Vec<Value> = in_window
+        .iter()
+        .map(|ev| {
+            let who = if ev["sender"].as_str() == Some(rig.principal(Who::Editor).as_str()) { "editor" } else { "other" };
+            let kind = match ev["type"].as_str() {
+                Some("org.tunaos.dcp.lease") => "lease",
+                Some("m.room.encrypted") => "version",
+                other => other.unwrap_or("?"),
+            };
+            json!([(ev["origin_server_ts"].as_u64().unwrap() - t0) as f64 / 1000.0, kind, who])
+        })
+        .collect();
+    println!("CHURN event offsets (s, kind, sender): {}", Value::Array(offsets.clone()));
     println!("CHURN events in the room during the window: {} ({by_type:?}); by sender {by_sender:?}", in_window.len());
     println!("CHURN WOPI requests the host saw: {wopi:?}");
     println!("CHURN PutFile 200s: {autosave_puts} autosave, {exit_puts} exit-save, {plain_puts} neither; refused PutFiles: {refused_puts}; LOCKs: {locks}; versions in the room now: {versions} (1 before)");
@@ -234,26 +256,38 @@ async fn a_scripted_collabora_session_and_the_homeservers_event_limits() {
             "locks": locks, "versions_after": versions, "unlock_seen": unlock_after.is_some(),
             "editor_events_sent": spent.sent, "editor_429s": spent.rate_limited, "editor_waited_secs": spent.waited_ms as f64 / 1000.0,
             "editor_events_in_room": editor_ts.len(), "budget_events": budget,
-            "bucket_misses_by_server_timestamps": misses,
+            "bucket_misses_by_server_timestamps": misses, "event_offsets": offsets, "stress": stress,
         }),
     );
+    let last_token_saved = rig
+        .view(Who::Owner)
+        .await
+        .ok()
+        .filter(|v| v.heads.len() == 1)
+        .is_some_and(|v| odf::content_xml(&v.heads[0].bytes).contains(&last_token));
+    let released = matches!(&lease, Ok(Some(l)) if l.body.state == dcp_core::LeaseState::Released);
+    println!(
+        "CHURN OUTCOME '{label}': UNLOCK seen {}, lease released {released}, refused PutFiles {refused_puts}, last typed text in the single newest head {last_token_saved}",
+        unlock_after.is_some()
+    );
 
-    // What must hold whatever the numbers are: the session really edited and
-    // saved through Matrix, and closed cleanly.
-    assert!(unlock_after.is_some(), "Collabora did not send UNLOCK within {tail} s of the close");
-    let lease = lease.expect("a lease record");
-    assert_eq!(lease.body.state, dcp_core::LeaseState::Released, "UNLOCK must release the lease in the Matrix room");
-    assert_eq!(refused_puts, 0, "Collabora's PutFiles were refused: {wopi:?}");
-    assert!(autosave_puts + exit_puts + plain_puts >= 1, "no PutFile reached the host in the whole session: {wopi:?}");
-    let view = rig.view(Who::Owner).await.expect("view");
-    assert_eq!(view.heads.len(), 1, "the session left {} heads", view.heads.len());
-    let content = odf::content_xml(&view.heads[0].bytes);
-    assert!(content.contains(&last_token), "the last typed text {last_token:?} is not in the newest version's content.xml");
+    // What must hold whatever the numbers are: the room holds exactly the
+    // events the editor's store counted as sent (the counting is sound).
     assert_eq!(
         in_window.iter().filter(|ev| ev["sender"].as_str() == Some(rig.principal(Who::Editor).as_str())).count() as u64,
         spent.sent,
         "the room holds a different number of events from the editor than its store counted as sent"
     );
+    if stress {
+        return;
+    }
+    // And, unless this is a stress run, that the session really edited and
+    // saved through Matrix and closed cleanly.
+    assert!(unlock_after.is_some(), "Collabora did not send UNLOCK within {tail} s of the close");
+    assert!(released, "UNLOCK must release the lease in the Matrix room: {lease:?}");
+    assert_eq!(refused_puts, 0, "Collabora's PutFiles were refused: {wopi:?}");
+    assert!(autosave_puts + exit_puts + plain_puts >= 1, "no PutFile reached the host in the whole session: {wopi:?}");
+    assert!(last_token_saved, "the last typed text {last_token:?} is not in the single newest version's content.xml");
 }
 
 fn owner_store(rig: &Rig) -> &MatrixStore {

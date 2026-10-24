@@ -18,7 +18,14 @@
 //!   really fails there is listed in [`DEFAULT_PROFILE_FAILURES`] with the
 //!   phrase its failure must contain, and the suite then asserts that exact
 //!   failure: it cannot start passing or fail for another reason unnoticed.
-//!   The table is empty while nothing fails.
+//!   The table is empty while nothing fails;
+//! * **`default-drained`** (`DCP_DRAIN_BURST=1` on the default profile): a
+//!   fresh user has Synapse's burst of 10 events, and one journey sends 3 to 8
+//!   events in all (measured), so on plain `default` nothing is ever delayed.
+//!   The drained profile spends each principal's burst before the document is
+//!   created ([`drain_message_budget`]: send into a scratch room until the first
+//!   `M_LIMIT_EXCEEDED`), which is a user who has been editing for a while: from
+//!   then on every event costs about 5 s. That is where the limits bite.
 
 use std::future::Future;
 use std::time::{Duration, Instant};
@@ -50,6 +57,61 @@ pub fn is_default(syn: &Synapse) -> bool {
     syn.profile == "default"
 }
 
+/// `DCP_DRAIN_BURST=1`: spend every principal's message budget before the
+/// document is created. Only meaningful on the default profile: setting it
+/// on any other panics, so a relaxed run cannot claim to be a drained one.
+pub fn drained(syn: &Synapse) -> bool {
+    let on = std::env::var("DCP_DRAIN_BURST").as_deref() == Ok("1");
+    assert!(!on || is_default(syn), "DCP_DRAIN_BURST=1 needs the default Synapse profile, got {:?}", syn.profile);
+    on
+}
+
+/// `relaxed`, `default` or `default-drained`: what a measurement is labelled.
+pub fn label(syn: &Synapse) -> String {
+    if drained(syn) {
+        "default-drained".into()
+    } else {
+        syn.profile.clone()
+    }
+}
+
+/// Send into a scratch room until Synapse answers `M_LIMIT_EXCEEDED`: the
+/// user's `rc_message` bucket is then empty, and every later event of this
+/// user, in any room, waits for a refill (0.2/s: about 5 s). Returns how many
+/// events it took (the burst, 10, plus what refilled meanwhile). The client's
+/// own retry is off (`MatrixStore::connect`), so the 429 comes back as an error.
+pub async fn drain_message_budget(store: &MatrixStore) -> Result<u32, Failure> {
+    use dcp_matrix::matrix_sdk::ruma::api::client::room::create_room;
+    let client = store.client();
+    // Room creation is rate limited too: retry it until it goes through.
+    let mut room = None;
+    for _ in 0..60 {
+        match client.create_room(create_room::v3::Request::new()).await {
+            Ok(r) => {
+                room = Some(r);
+                break;
+            }
+            Err(e) if is_rate_limited(&e.to_string()) || is_rate_limited(&format!("{e:?}")) => {
+                tokio::time::sleep(Duration::from_secs(5)).await
+            }
+            Err(e) => return Err(Failure::new(format!("draining the message budget: cannot create a scratch room: {e}"))),
+        }
+    }
+    let room = room.ok_or_else(|| Failure::new("draining the message budget: the scratch room was always rate limited"))?;
+    for sent in 1..=200u32 {
+        match room.send_raw("m.room.message", json!({"msgtype": "m.text", "body": "spending the burst"})).await {
+            Ok(_) => {}
+            Err(e) if is_rate_limited(&e.to_string()) || is_rate_limited(&format!("{e:?}")) => return Ok(sent - 1),
+            Err(e) => return Err(Failure::new(format!("draining the message budget: {e}"))),
+        }
+    }
+    Err(Failure::new("draining the message budget: 200 events and still no M_LIMIT_EXCEEDED: is this the default profile?"))
+}
+
+fn is_rate_limited(text: &str) -> bool {
+    text.contains("M_LIMIT_EXCEEDED") || text.contains("LimitExceeded") || text.contains("Too Many Requests") || text.contains("429")
+}
+
 pub fn settle_for(syn: &Synapse) -> Duration {
     if is_default(syn) {
         SETTLE_DEFAULT
@@ -66,16 +128,15 @@ pub fn deadline_for(syn: &Synapse) -> Duration {
     }
 }
 
-/// `(name, phrase)`: on the default profile `name` (a check or a journey) is
-/// known to fail, and the failure must contain `phrase`. Filled in only from a
-/// measured run, with the run cited in `docs/rfc/0004-spike-f-results.md`.
-pub const DEFAULT_PROFILE_FAILURES: &[(&str, &str)] = &[];
+/// `(label, name, phrase)`: on the profile `label` (`default` or
+/// `default-drained`) `name` (a check, `<check>@draft0`, or `<stack>/<journey>`)
+/// is known to fail, and the failure must contain `phrase`. Filled in only
+/// from a measured run, with the run cited in `docs/rfc/0004-spike-f-results.md`.
+pub const DEFAULT_PROFILE_FAILURES: &[(&str, &str, &str)] = &[];
 
 pub fn expected_failure(syn: &Synapse, name: &str) -> Option<&'static str> {
-    if !is_default(syn) {
-        return None;
-    }
-    DEFAULT_PROFILE_FAILURES.iter().find(|(n, _)| *n == name).map(|(_, p)| *p)
+    let label = label(syn);
+    DEFAULT_PROFILE_FAILURES.iter().find(|(l, n, _)| *l == label && *n == name).map(|(_, _, p)| *p)
 }
 
 /// Add the counters of several stores.
@@ -123,15 +184,16 @@ pub struct Timing {
 
 impl Timing {
     pub fn slow_on_default(&self) -> bool {
-        self.profile == "default" && self.setup_secs + self.secs > SLOW_ON_DEFAULT_SECS
+        self.profile.starts_with("default") && self.setup_secs + self.secs > SLOW_ON_DEFAULT_SECS
     }
 
     /// Print one line and append the record to `$DCP_MEASURE_OUT` (the helper
     /// spike A's measurements use).
     pub fn record(&self, syn: &Synapse) {
         println!(
-            "TIMING {:<9} {:<66} {:<8} setup {:>7.1}s run {:>7.1}s  sent {:>3}  429s {:>3}  waited {:>7.1}s  {}{}",
+            "TIMING {:<7} {:<10} {:<66} {:<15} setup {:>7.1}s run {:>7.1}s  sent {:>3}  429s {:>3}  waited {:>7.1}s  {}{}",
             self.kind,
+            self.stack.split_whitespace().next().unwrap_or(""),
             self.name,
             self.profile,
             self.setup_secs,
@@ -146,7 +208,7 @@ impl Timing {
             syn,
             "interop_timing",
             json!({
-                "kind": self.kind, "name": self.name, "stack": self.stack,
+                "kind": self.kind, "name": self.name, "stack": self.stack, "label": self.profile,
                 "setup_secs": self.setup_secs, "secs": self.secs, "outcome": self.outcome,
                 "detail": self.detail, "sent": self.sent, "rate_limited": self.rate_limited,
                 "waited_secs": self.waited_secs, "slow_on_default": self.slow_on_default(),
@@ -206,7 +268,7 @@ fn finish(
         kind,
         name: name.to_owned(),
         stack: "wopi+matrix".into(),
-        profile: syn.profile.clone(),
+        profile: label(syn),
         setup_secs,
         secs,
         outcome,
@@ -225,13 +287,13 @@ fn finish(
 pub fn judge(syn: &Synapse, name: &str, result: Result<(), Failure>) {
     match (expected_failure(syn, name), result) {
         (None, Ok(())) => {}
-        (None, Err(f)) => panic!("{name} failed on the {} profile: {f}", syn.profile),
+        (None, Err(f)) => panic!("{name} failed on the {} profile: {f}", label(syn)),
         (Some(phrase), Err(f)) => {
-            println!("{name}: failed on the default profile as recorded: {f}");
+            println!("{name}: failed on the {} profile as recorded: {f}", label(syn));
             assert!(f.0.contains(phrase), "{name}: failed for another reason than the recorded one ({phrase:?}): {f}");
         }
         (Some(phrase), Ok(())) => {
-            panic!("{name} PASSED on the default profile but is recorded as failing ({phrase:?}); update DEFAULT_PROFILE_FAILURES and the results document")
+            panic!("{name} PASSED on the {} profile but is recorded as failing ({phrase:?}); update DEFAULT_PROFILE_FAILURES and the results document", label(syn))
         }
     }
 }
@@ -270,7 +332,7 @@ pub async fn run_all_timed(factory: &InteropFactory) -> Report {
             kind: "journey",
             name: r.name.to_owned(),
             stack: factory.name(),
-            profile: syn.profile.clone(),
+            profile: label(&syn),
             setup_secs: 0.0,
             secs,
             outcome: label,
@@ -296,13 +358,13 @@ pub fn judge_report(syn: &Synapse, stack: &str, report: &Report) {
         let key = format!("{stack}/{}", r.name);
         match (&r.outcome, expected_failure(syn, &key)) {
             (Outcome::Skipped { .. }, _) | (Outcome::Passed, None) => {}
-            (Outcome::Failed(f), None) => problems.push(format!("{key} failed on the {} profile: {f}", syn.profile)),
+            (Outcome::Failed(f), None) => problems.push(format!("{key} failed on the {} profile: {f}", label(syn))),
             (Outcome::Failed(f), Some(phrase)) if !f.0.contains(phrase) => {
                 problems.push(format!("{key} failed for another reason than the recorded one ({phrase:?}): {f}"))
             }
             (Outcome::Failed(_), Some(_)) => {}
             (Outcome::Passed, Some(phrase)) => {
-                problems.push(format!("{key} PASSED on the default profile but is recorded as failing ({phrase:?})"))
+                problems.push(format!("{key} PASSED on the {} profile but is recorded as failing ({phrase:?})", label(syn)))
             }
         }
     }

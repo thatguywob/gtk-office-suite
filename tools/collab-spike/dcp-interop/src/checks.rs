@@ -1131,17 +1131,10 @@ pub async fn a_demoted_editor_cannot_publish_and_readers_drop_what_slips_through
     status("the ex-editor's LOCK", &wire.lock("demoted-lock").await?, 403)?;
     status("the ex-editor's PutFile", &wire.put_file(None, None, b"saved by an ex-editor").await?, 403)?;
 
-    let v2_stamped = rig
-        .native(Who::Owner)
-        .versions(doc)
-        .await?
-        .into_iter()
-        .find(|v| v.id == v2.id)
-        .ok_or_else(|| Failure::new("the owner does not list the ex-editor's earlier version"))?;
     let forged_version = Version {
         dcp: 1,
         parents: vec![v2.id.clone()],
-        file: v2_stamped.body.file.clone(),
+        file: v2.body.file.clone(),
         created_by: Author { principal: editor_id.clone(), device: editor.device() },
         message: Some("forged by a demoted editor".into()),
         covers: None,
