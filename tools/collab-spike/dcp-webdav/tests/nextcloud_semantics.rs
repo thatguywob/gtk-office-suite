@@ -685,3 +685,66 @@ async fn latency_of_the_operations_a_binding_uses() {
     samples("lease_read_propfind_plus_get", lease_read);
     samples("lease_write_create_one_record", lease_write);
 }
+
+// --------------------------------------------------------- the lease log
+
+/// The lease log's compare-and-set under real concurrency: two handles that have
+/// read record `n` both try to create record `n + 1`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lease_log_is_a_compare_and_set_under_concurrency() {
+    use dcp_conformance::{new_file, standard_meta};
+    use dcp_core::lease::{Claim, released};
+    use dcp_core::{DocumentStore, Role, StoreError};
+    if require("lease_log_is_a_compare_and_set_under_concurrency", &[url_a()]).await.is_none() {
+        return;
+    }
+    let base = url_a();
+    let clock = clock(&base).await;
+    let fault = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let owner = store(&base, "alice", &clock, &fault);
+    let editor = store(&base, "bob", &clock, &fault);
+    let doc = owner.create_document(&standard_meta(), Some(new_file(b"base"))).await.unwrap();
+    owner.grant(&doc, &editor.principal(), Role::Editor).await.unwrap();
+    let first = owner.versions(&doc).await.unwrap()[0].id.clone();
+
+    let rounds = 20;
+    let (mut one_won, mut both_won, mut none_won) = (0, 0, 0);
+    let mut losers = std::collections::BTreeMap::<String, u32>::new();
+    for i in 0..rounds {
+        // Both read the same latest record, as two sessions that looked at once.
+        let seen_o = owner.lease(&doc).await.unwrap();
+        let seen_e = editor.lease(&doc).await.unwrap();
+        assert_eq!(seen_o.as_ref().map(|l| l.id.clone()), seen_e.as_ref().map(|l| l.id.clone()));
+        let co = Claim::new(owner.principal(), format!("o{i}"), "t", &first, 60_000);
+        let ce = Claim::new(editor.principal(), format!("e{i}"), "t", &first, 60_000);
+        let (wo, we) = tokio::join!(
+            owner.write_lease(&doc, co.lease_over(seen_o.as_ref())),
+            editor.write_lease(&doc, ce.lease_over(seen_e.as_ref()))
+        );
+        match (wo.is_ok(), we.is_ok()) {
+            (true, false) | (false, true) => one_won += 1,
+            (true, true) => both_won += 1,
+            (false, false) => none_won += 1,
+        }
+        for r in [&wo, &we] {
+            if let Err(e) = r {
+                assert!(matches!(e, StoreError::Conflict(_)), "the loser must get Conflict, got {e:?}");
+                *losers.entry(e.to_string().chars().take(60).collect()).or_default() += 1;
+            }
+        }
+        // And the log still has exactly one newest record: the winner's.
+        let now = owner.lease(&doc).await.unwrap().unwrap();
+        let winner_session = if wo.is_ok() { format!("o{i}") } else { format!("e{i}") };
+        if one_won + both_won + none_won == i + 1 && (wo.is_ok() != we.is_ok()) {
+            assert_eq!(now.body.holder.as_ref().unwrap().session, winner_session);
+        }
+        // A release keeps the chain going from the winner's record.
+        if i % 5 == 4 {
+            owner.lease(&doc).await.unwrap();
+            owner.write_lease(&doc, released()).await.unwrap();
+        }
+    }
+    measure("lease_log_concurrent_writers", json!({ "rounds": rounds, "exactly_one_won": one_won, "both_won": both_won, "neither_won": none_won, "loser_errors": losers }));
+    assert_eq!(both_won, 0, "two writers both created the same record number");
+    assert_eq!(none_won, 0, "no writer won");
+}
