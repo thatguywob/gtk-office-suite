@@ -24,16 +24,14 @@ async fn journeys_over_a_federation() {
         "unknown_algorithm_falls_back_to_versions",
         "update_stream_gap_recovery",
     ]);
-    // Expected failures are pinned by name (and explained in the results
-    // document) rather than tolerated: a failure that appears or disappears
-    // fails this test.
-    let mut failed = report.failed();
-    failed.sort_unstable();
-    assert_eq!(failed, EXPECTED_FAILURES, "{report}");
+    // `lease_expiry_releases` is the one journey whose clock a federation strains: it
+    // needs the renewal and its read-backs to fit in 0.5 s after the record's own
+    // timestamp, and every operation is two server hops. It failed in most
+    // federated runs and passed in some; `tests/lease_timing.rs` runs it with the
+    // duration as a parameter and requires 20 s to pass. Everything else MUST pass.
+    let failed = report.failed();
+    assert!(
+        failed.iter().all(|n| *n == "lease_expiry_releases"),
+        "only lease_expiry_releases may fail over a federation: {failed:?}\n{report}"
+    );
 }
-
-/// Journeys that fail over a federation, and why (results document, "Over OCM").
-/// Filled in from the measured run: `lease_expiry_releases` needs the renewal
-/// and its read-backs to fit in 0.5 s after the lease's own timestamp, and a
-/// request through two Nextcloud servers takes longer than that.
-const EXPECTED_FAILURES: [&str; 1] = ["lease_expiry_releases"];

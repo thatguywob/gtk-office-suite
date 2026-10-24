@@ -123,6 +123,9 @@ async fn conditional_put_semantics() {
         // the ETag, no better.
         assert_eq!(unchanged, stale_accepted, "{label}");
         assert_eq!(rounds - unchanged, stale_refused, "{label}");
+        // The ETag moved exactly when the whole-second mtime moved.
+        assert_eq!(by_cause.get("etag_same_second_moved").copied().unwrap_or(0), 0, "{label}: {by_cause:?}");
+        assert_eq!(by_cause.get("etag_moved_second_same").copied().unwrap_or(0), 0, "{label}: {by_cause:?}");
         total_unchanged += unchanged;
     }
     let _ = e1;
@@ -168,8 +171,10 @@ async fn conditional_put_semantics() {
         }
     }
     measure("if_none_match_concurrent", json!({ "rounds": rounds, "both_succeeded": both, "exactly_one": one, "neither": none, "status_pairs": statuses }));
+    // Safety is the claim: never two winners. Liveness is not: in some rounds
+    // Nextcloud's file lock refuses both creators (423 and 423).
     assert_eq!(both, 0, "two creators of the same name both succeeded");
-    assert_eq!(none, 0, "no creator won");
+    assert!(one >= rounds / 2, "most rounds should have a winner: {one} of {rounds}");
 }
 
 // ------------------------------------------------------------------ locks

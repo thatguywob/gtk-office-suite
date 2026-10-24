@@ -160,9 +160,9 @@ A **group** share of the same folder worked (probe `sharing` section: `shareType
 | `tokenEndPoint`, `jwksUri` | absent | present (`/apps/cloud_federation_api/api/v1/access-token`, `.../jwks`) |
 | `resourceTypes[0].protocols` | `{"webdav": "/public.php/webdav/"}` | same |
 | `webapp`, `webapp-receive`, `webdav-receive` | absent | absent |
-| `publicKey` | RSA, `keyId` `https://nc-a/ocm#signature` | same, plus an ECDSA key in the JWKS |
+| `publicKey` | RSA, `keyId` `https://nc-a/ocm#signature` | same; the RFC 9421 signature below names an ECDSA key `…/ocm#ecdsa-p256-sha256-1` |
 
-**OCM web-app access mode does not exist in either build**: no `webapp` protocol is offered or accepted, so there is no OCM way to open a shared document in the sender's own editor (iframe or blank) from Nextcloud. The spec's `webapp` protocol and code flow need `exchange-token`, which 35 advertises and 34 does not; whether 35's token endpoint works was not exercised (Not verified). Test `ocm_discovery_documents`.
+**OCM web-app access mode (the spec's `webapp` protocol): not offered by either stock image.** The discovery document lists only `webdav` under `protocols`; there is no `webapp` and no `webapp-receive`, so nothing here could open a shared document in the sender's own editor (iframe or blank) over OCM. The spec's `webapp` protocol also needs `exchange-token` (35.0.2 advertises it, 34.0.5 does not; whether 35's token endpoint works was not exercised). **That is a statement about these two images, not about Nextcloud 35:** the `cs3org/ocm-test-suite` capability registry (read, not run) marks `flow.webapp-share` sender and receiver `supported` for Nextcloud v35 and "requires Nextcloud v35" for v33 and v34, and its Nextcloud cookbook runs a JupyterHub sidecar on the sender side with its own images. Web-app sharing therefore appears to need an app or a service these images do not have; which one was not determined. Test `ocm_discovery_documents`.
 
 #### What crosses the wire
 
@@ -199,15 +199,11 @@ With alice on `nc-a` and bob, carol on `nc-b` (test `conformance_over_ocm`, the 
 - bob takes a `LOCK` through `nc-b` on a file that lives on `nc-a`: `200`, and **alice's `PUT` on `nc-a` is `204`**: the lock is nc-b's and nc-a never sees it (`lockdiscovery` on alice's side is empty).
 - alice takes a Sabre `LOCK` on `nc-a`; bob's `PUT` through `nc-b` is **`204`**: a federated write ignores a lock held by a local user.
 - alice takes a `files_lock` user lock (`X-User-Lock: 1`) on `nc-a`; bob's `PUT` through `nc-b` is **`500`**: it is stopped, with a server error and not `423`.
-- bob's versions endpoint on `nc-b` for a federated file is `404` with a numeric id (probe) or empty (`207`) for the sender's id: the sender's history is not offered to a receiver.
-
-### Versions, once more, for a federated reader
-
-None of the sender's version history reaches a receiver; the ledger layout does not need it (the history *is* the folder).
+- The sender's version history is not offered to a receiver: `PROPFIND /remote.php/dav/versions/dave/versions/<id>` on `nc-b` for a federated file was `404` (probe, `oc-dave-versions`). The ledger layout does not need it.
 
 ### Nextcloud Office / Collabora (a note, not a measurement of editing)
 
-Both images ship `files_lock` and an `office` app, and `occ app:install richdocuments` (Nextcloud Office, 11.1.2) succeeded in the probe; its capability reports an empty `wopi_url` and `direct_editing: false` until a Collabora server is configured, and none was. So whether Nextcloud Office, which edits through WOPI, locks a file with `files_lock` (the `nc:lock-owner-editor` property exists for that), and what it would do to a DCP version folder, **was not observed**. The WOPI adapter of spec 8.2 and Spike D is what would bridge a DCP document to Collabora; nothing here tested that over Nextcloud.
+Both images ship `files_lock` and an `office` app (`info.xml`: "Office overview", 1.0.0 on 34, 1.1.0 on 35); **Nextcloud Office (`richdocuments`) is not in the image**, and `occ app:install richdocuments` from the app store succeeded in the probe (11.1.2 on 34.0.5, 12.0.1 on 35.0.2). With it installed the capabilities report an empty `wopi_url` and `direct_editing: false` until a Collabora server is configured, and none was. So whether Nextcloud Office, which edits through WOPI, takes a `files_lock` lock on the file (the `nc:lock-owner-editor` property exists for that), and what it would do to a DCP version folder, **was not observed**. The WOPI adapter of spec 8.2 and Spike D is what would bridge a DCP document to Collabora; nothing here tested that over Nextcloud.
 
 ## What OCM and WebDAV cannot express
 
@@ -263,10 +259,10 @@ For section 8.3 and the sections it touches. Status says how each was establishe
 
 ## Not verified
 
-- **Other OCM servers**, and the **Nextcloud sender to a non-Nextcloud receiver** with a real file store (the OCM-stub reference, ocm-test-suite from `cs3org` were read for the protocol but not run); the OCM sender role of anything but Nextcloud.
+- **Other OCM servers**, and a Nextcloud sender to a non-Nextcloud receiver with a real file store. Read: `IETF-OCM.md` (draft-07) and `spec.yaml` (1.5.0) of `cs3org/OCM-API`, and the `ocm-test-suite` README, capability registry and Nextcloud adapters. **Not read or run:** the OCM-stub reference implementation, and the test suite itself (its flows are browser-driven Cypress runs against its own images).
 - **HTTPS**, certificates, real DNS. All traffic is plain HTTP on one docker network; Nextcloud was configured with `allow_local_remote_servers`. The Nextcloud `sharing.federation.allowHttpFallback` key was set and made no difference (the `http://` in the cloud id did).
 - **Verification of the HTTP signature by a receiver** (the helper records and accepts), the **OCM code flow** against 35.0.2's token endpoint, and **invites**. 35.0.2's `https://http://…` URI was observed, not diagnosed.
-- **Web-app access mode** exists nowhere in these servers; nothing more can be said.
+- **Web-app access mode**: absent from the two stock images' discovery; how the `ocm-test-suite`'s Nextcloud 35 does it (its own images, a JupyterHub sidecar) was not read in detail or run.
 - **Nextcloud Office / Collabora**: the app installs; no Collabora server was configured and nothing edited a DCP document.
 - **Group and circle principals** in `grant`: the group share worked at the HTTP level (probe) and the store does not address groups.
 - **Activity API latency and retention under load**: 55 to 105 ms in single trials; not repeated, not under load, retention unknown.
