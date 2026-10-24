@@ -251,7 +251,10 @@ pub async fn run_session(
     let mut sink = FramedWrite::new(send, Codec::<LogSyncMessage<LogId>>::new());
     let mut stream = FramedRead::new(recv, Codec::<LogSyncMessage<LogId>>::new());
 
-    let result = protocol.run(&mut sink, &mut stream).await;
+    let result = match tokio::time::timeout(SESSION_TIMEOUT, protocol.run(&mut sink, &mut stream)).await {
+        Ok(r) => r.map_err(|e| e.to_string()),
+        Err(_) => Err(format!("the session did not finish within {SESSION_TIMEOUT:?}")),
+    };
     // Finish the send half before anything else so the remote reads our last message.
     let mut send = sink.into_inner();
     let _ = send.finish();
@@ -276,7 +279,7 @@ pub async fn run_session(
             sent_bytes: metrics.sent_bytes,
         }),
         Err(e) => {
-            error = Some(e.to_string());
+            error = Some(e);
             None
         }
     };
@@ -296,3 +299,5 @@ pub fn short(h: &Hash) -> String {
 }
 
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+/// A session that has not finished by then is given up (it holds the document's read lock).
+pub const SESSION_TIMEOUT: Duration = Duration::from_secs(90);

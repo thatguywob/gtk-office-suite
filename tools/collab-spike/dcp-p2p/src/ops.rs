@@ -167,7 +167,7 @@ impl Inner {
             Some(l) if l == access.level => Ok(()),
             Some(_) => {
                 // Both operations become visible to sessions together.
-                let _both = doc.serving.write().await;
+                let _both = self.hold_sessions(doc).await;
                 // p2panda-auth has promote and demote, but p2panda-spaces 0.7.1 panics when a
                 // space processes either (`unimplemented!()` in `encryption/message.rs`), so a
                 // role change is a removal followed by an addition: the group key rotates twice.
@@ -188,7 +188,7 @@ impl Inner {
         }
         // No session may read the removal before the gate knows the member is gone.
         let space_msg = {
-            let _w = doc.serving.write().await;
+            let _w = self.hold_sessions(doc).await;
             self.remove_member(doc, target).await?
         };
         drop(_g);
@@ -197,6 +197,20 @@ impl Inner {
         // see the results document.
         self.confirm_applied(doc, space_msg).await;
         Ok(())
+    }
+
+    /// Keep the document's sessions out while a membership change is being made. A session holds
+    /// the lock across network waits, so the wait is bounded: two nodes that both change membership
+    /// while sessions run between them would otherwise wait for each other. On a timeout the change
+    /// goes ahead without the exclusion (the removal may then be served before the gate knows it).
+    async fn hold_sessions<'a>(&self, doc: &'a Doc) -> Option<tokio::sync::RwLockWriteGuard<'a, ()>> {
+        match tokio::time::timeout(std::time::Duration::from_secs(5), doc.serving.write()).await {
+            Ok(g) => Some(g),
+            Err(_) => {
+                tracing::warn!("sessions did not finish in 5 s; changing membership without excluding them");
+                None
+            }
+        }
     }
 
     fn require_manager(&self, doc: &Doc, what: &str) -> Result<(), StoreError> {

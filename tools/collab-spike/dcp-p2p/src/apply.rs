@@ -17,13 +17,14 @@ use crate::replica::{tr, Doc, Entry, Inner};
 use crate::signed;
 
 impl Inner {
-    /// Store a batch of operations in ONE transaction, with the document's sessions held off, so
-    /// that a peer asking this node for operations sees all of the batch or none of it.
+    /// Store a batch of operations in ONE transaction, so that a peer asking this node for
+    /// operations sees all of the batch or none of it. (No lock against sessions is taken here: a
+    /// receiver that waited for the sessions' read lock deadlocked with its peer, which waited the
+    /// same way, in a CI run of the journeys.)
     async fn store_ops(&self, doc: &Doc, ops: &[Operation<DcpExt>]) -> Result<(), StoreError> {
         if ops.is_empty() {
             return Ok(());
         }
-        let _w = doc.serving.write().await;
         let permit = doc.store.begin().await.map_err(tr)?;
         let mut result = Ok(());
         for op in ops {
