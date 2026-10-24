@@ -13,10 +13,12 @@ name: collab-spike-b
 # A test that needs a server FAILS when none is configured; only DCP_SKIP_STREAMS=1
 # (or DCP_SKIP_STREAMS_AUTH=1) skips it, and the test says so.
 #
-# Measurements (docs/rfc/0004-spike-b-results.md) run when workflow_dispatch asks,
-# or when the head commit message contains "[measure]" (a workflow can only be
-# dispatched once it is on the default branch, so on a spike branch the commit
-# message is the switch).
+#   streams    the tests, debug build, on every push
+#   measure    the measurements of docs/rfc/0004-spike-b-results.md, release build,
+#              in a second job so that it runs beside `streams`; it runs when
+#              workflow_dispatch asks, or when the head commit message contains
+#              "[measure]" (a workflow can only be dispatched once it is on the
+#              default branch, so on a spike branch the commit message is the switch).
 on:
   push:
     branches: [spike/collab-b]
