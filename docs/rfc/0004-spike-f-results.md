@@ -56,7 +56,7 @@ other WOPI clients, a real network, or release builds.
 
 ## What was run
 
-Workflow [`collab-spike-f.yml`](../../.github/workflows/collab-spike-f.yml) (branch only), jobs:
+Workflow [`collab-spike.yml`](../../.github/workflows/collab-spike.yml) (run as the spike's own workflow `collab-spike-f.yml`, merged into it at integration; now the jobs `interop`, `lease-race`, `wopi-sim` and `collabora`), jobs:
 
 | Job | Command (in `tools/collab-spike`, after `eval "$(scripts/synapse-up.sh <profile>)"`) |
 |---|---|

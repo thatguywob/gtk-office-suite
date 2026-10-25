@@ -75,7 +75,7 @@ TTL and expiry, retention (`410 Gone`). **Authentication and authorisation are "
 `dcp-streams` is a crate in the standalone `tools/collab-spike` workspace. The run that every number below
 comes from is [40137430958](https://github.com/tuna-os/gtk-office-suite/actions/runs/40137430958) at commit
 `0c99551` of branch `spike/collab-b`, workflow
-[`collab-spike-b.yml`](../../.github/workflows/collab-spike-b.yml), two jobs, both green:
+[`collab-spike.yml`](../../.github/workflows/collab-spike.yml) (run as the spike's own workflow `collab-spike-b.yml`, merged into it at integration; now the jobs `streams` and `streams-measure`), two jobs, both green:
 
 - `streams` (debug build, 1 m 57 s): `cargo test -p dcp-streams --lib` (6 tests); then the whole `--test
   streams` suite against the Node server (25 passed, 0 failed; 9 `#[ignore]`d measurements not run); then the

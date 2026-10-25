@@ -1,32 +1,47 @@
 name: collab-spike
 
-# RFC-0004 spikes: the Document Collaboration Protocol bindings and the shared
-# conformance suite, and the two bindings run against each other. Not part of
-# the product CI; the crates are a standalone workspace in tools/collab-spike.
+# RFC-0004 spikes: the Document Collaboration Protocol (DCP) bindings, the shared
+# conformance suite, and the bindings run against each other and against real
+# services. Not part of the product CI; the crates are in tools/collab-spike
+# (two cargo workspaces: dcp-p2p is its own, see the `exclude` in
+# tools/collab-spike/Cargo.toml).
 #
-#   check      cargo check --workspace --all-targets (compiles everything)
-#   core       dcp-core, dcp-conformance (its mutation tests), the schemas
-#   matrix     MatrixStore on a real Synapse, relaxed and default rate limits
-#   wopi-sim   WopiHost / WopiClientStore over the in-memory store (no Collabora)
-#   interop    dcp-interop: MatrixStore and WopiHost<MatrixStore> against each
-#              other on a real Synapse (conformance journeys on both stacks,
-#              cross-binding checks, negative controls)
-#   collabora  real Collabora Online editing a document WopiHost serves: over
-#              the in-memory store (dcp-wopi's collabora_e2e) and over a Matrix
-#              room on a real Synapse (dcp-interop's collabora_over_matrix).
-#              Runs on workflow_dispatch, nightly, on a push whose head commit
-#              message contains "[collabora]" (a workflow can only be dispatched
-#              once it exists on the default branch, so on a spike branch this
-#              switch is how it runs), and on a pull request that touches
-#              tools/collab-spike/dcp-wopi/**.
+#   check          cargo check --all-targets --locked on BOTH workspaces (the two
+#                  committed Cargo.lock files must be the ones that resolve), and
+#                  the resolved versions of the p2p stack
+#   core           dcp-core, dcp-conformance (its mutation tests), the schemas
+#   matrix         MatrixStore on a real Synapse, relaxed and default rate limits
+#   wopi-sim       WopiHost / WopiClientStore over the in-memory store (no Collabora)
+#   interop        dcp-interop: MatrixStore and WopiHost<MatrixStore> against each
+#                  other on a real Synapse, on three profiles: relaxed, default,
+#                  default-drained (every principal's message budget spent first)
+#   lease-race     lease rule 3's two-read rule, 200 forced races, both profiles
+#   collabora      real Collabora Online editing a document WopiHost serves: over the
+#                  in-memory store, over a Matrix room, and the scripted session
+#                  churn test against Synapse's default limits
+#   streams        dcp-streams against the Durable Streams Node reference server
+#                  0.3.9 and the Go server (Caddy plugin), and behind basic_auth
+#   p2p            dcp-p2p (iroh + p2panda): journeys, the p2p-specific tests, a
+#                  relay, a Flatpak build sandbox; no service is needed
+#   webdav         dcp-webdav against two real Nextcloud instances (34.0.5 and
+#                  35.0.2): the journeys on one instance and across an OCM
+#                  federation, semantics, OCM receiver, lease timing
 #
-# Results and what is not verified: docs/rfc/0004-spike-{a,d,interop}-results.md
+# Heavy jobs (collabora, the measure jobs) run on a schedule, on workflow_dispatch,
+# on a push whose head commit message contains "[collabora]" / "[measure]" (a
+# workflow can only be dispatched once it is on the default branch, so on a spike
+# branch the commit message is the switch), and, for collabora, on a pull request
+# that touches dcp-wopi or dcp-interop.
 #
-# A test that needs Synapse or Collabora FAILS when the service is missing; only
-# DCP_SKIP_SYNAPSE=1 / DCP_SKIP_COLLABORA=1 skip it, and the test says so.
+# Results and what is not verified: docs/rfc/0004-spike-*-results.md
+#
+# A test that needs a service (Synapse, Collabora, a Durable Streams server,
+# Nextcloud) FAILS when the service is missing; only DCP_SKIP_SYNAPSE=1 /
+# DCP_SKIP_COLLABORA=1 / DCP_SKIP_STREAMS=1 / DCP_SKIP_NEXTCLOUD=1 skip it, and the
+# test says so. Each job checks both behaviours.
 on:
   push:
-    branches: [spike/collab]
+    branches: [spike/collab, 'spike/collab-*']
     paths:
       - 'tools/collab-spike/**'
       - 'docs/collab-spec/**'
@@ -41,7 +56,7 @@ on:
   workflow_dispatch:
     inputs:
       measure:
-        description: 'Also run the spike-A measurements (about two hours)'
+        description: 'Also run the measurements (spike A: about two hours; spikes B and C)'
         type: boolean
         default: false
 
@@ -55,20 +70,20 @@ env:
   CARGO_PROFILE_DEV_DEBUG: line-tables-only
   CARGO_PROFILE_TEST_DEBUG: line-tables-only
   CARGO_INCREMENTAL: 0
-  # Surfaced into the results document.
+  # Surfaced into the results documents.
   SYNAPSE_IMAGE: docker.io/matrixdotorg/synapse:latest
+  # Pinned by tag and digest (docker hub, 2026-10-24); the Nextcloud images under test are
+  # the matrix entries of the webdav jobs.
+  POSTGRES_IMAGE: docker.io/library/postgres:16-alpine@sha256:f4610795587492cd4fb887c2dc3de301b813278bb6f616992061141b5f15ac36
 
 permissions:
   contents: read
 
 jobs:
   check:
-    name: cargo check --workspace --all-targets
+    name: cargo check --all-targets --locked (both workspaces)
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
-    defaults:
-      run:
-        working-directory: tools/collab-spike
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Install Rust stable
@@ -77,11 +92,40 @@ jobs:
           toolchain: stable
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
-          workspaces: tools/collab-spike
+          workspaces: |
+            tools/collab-spike
+            tools/collab-spike/dcp-p2p
           shared-key: collab-spike-check
-      # --locked: the committed Cargo.lock must be the one the workspace resolves to.
-      - name: cargo check --workspace --all-targets --locked
+      - name: Versions
+        run: |
+          rustc --version
+          cargo --version
+      # --locked: each committed Cargo.lock must be the one its workspace resolves to.
+      # dcp-p2p is its own workspace (tools/collab-spike/Cargo.toml `exclude`): matrix-sdk and
+      # p2panda-store need libsqlite3-sys versions that cannot share one resolution.
+      - name: cargo check --workspace --all-targets --locked (tools/collab-spike)
+        working-directory: tools/collab-spike
         run: cargo check --workspace --all-targets --locked
+      - name: cargo check --all-targets --locked (tools/collab-spike/dcp-p2p)
+        working-directory: tools/collab-spike/dcp-p2p
+        run: cargo check --all-targets --locked
+      - name: cargo check --all-targets --features relay-test --locked (tools/collab-spike/dcp-p2p)
+        working-directory: tools/collab-spike/dcp-p2p
+        run: cargo check --all-targets --features relay-test --locked
+      - name: Resolved versions of the p2p stack
+        working-directory: tools/collab-spike/dcp-p2p
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/results"
+          cargo tree --locked -p dcp-p2p --depth 1 | tee "$GITHUB_WORKSPACE/results/cargo-tree-depth1.txt"
+          for c in iroh iroh-blobs iroh-base noq p2panda-core p2panda-store p2panda-sync p2panda-auth p2panda-encryption p2panda-spaces cbor-core sqlx libsqlite3-sys; do
+            grep -A1 "name = \"$c\"" Cargo.lock | head -2 | tr '\n' ' '; echo
+          done | tee "$GITHUB_WORKSPACE/results/resolved-versions.txt"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        if: always()
+        with:
+          name: p2p-resolved-versions
+          path: results/
+          if-no-files-found: warn
 
   core:
     name: dcp-core, dcp-conformance, schemas
@@ -163,7 +207,7 @@ jobs:
           cargo test -p dcp-matrix --locked --no-fail-fast --test journeys --test conformance -- --nocapture 2>&1 | tee "$GITHUB_WORKSPACE/measurements/journeys-default.log"
 
       - name: Measurements (relaxed rate limits)
-        if: ${{ !cancelled() && github.event_name == 'workflow_dispatch' && inputs.measure }}
+        if: ${{ !cancelled() && ((github.event_name == 'workflow_dispatch' && inputs.measure) || contains(github.event.head_commit.message, '[measure]')) }}
         env:
           DCP_MEASURE_OUT: ${{ github.workspace }}/measurements/relaxed.jsonl
         run: |
@@ -173,7 +217,7 @@ jobs:
           cargo test -p dcp-matrix --locked --test measure -- --ignored --test-threads=1 --nocapture 2>&1 | tee "$GITHUB_WORKSPACE/measurements/measure-relaxed.log"
 
       - name: Measurements (Synapse default rate limits)
-        if: ${{ !cancelled() && github.event_name == 'workflow_dispatch' && inputs.measure }}
+        if: ${{ !cancelled() && ((github.event_name == 'workflow_dispatch' && inputs.measure) || contains(github.event.head_commit.message, '[measure]')) }}
         env:
           DCP_MEASURE_OUT: ${{ github.workspace }}/measurements/default.jsonl
         run: |
@@ -235,9 +279,25 @@ jobs:
           test "$(grep -c 'SKIPPED collabora_e2e' "$RUNNER_TEMP/skip.log")" -eq 4
 
   interop:
-    name: dcp-interop (MatrixStore and WopiHost over MatrixStore, one Synapse)
+    name: interop ${{ matrix.tag }} / ${{ matrix.suite }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 120
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { tag: relaxed,         profile: relaxed, drain: '',  suite: conformance,   tests: '--test conformance',     threads: 2 }
+          - { tag: relaxed,         profile: relaxed, drain: '',  suite: cross_binding, tests: '--test cross_binding',   threads: 2 }
+          - { tag: relaxed,         profile: relaxed, drain: '',  suite: controls,      tests: '--test negative_control', threads: 2 }
+          - { tag: default,         profile: default, drain: '',  suite: conformance,   tests: '--test conformance',     threads: 4 }
+          - { tag: default,         profile: default, drain: '',  suite: cross_binding, tests: '--test cross_binding',   threads: 4 }
+          # Every principal's message budget spent first: each event is then paced by the homeserver.
+          - { tag: default-drained, profile: default, drain: '1', suite: conformance,   tests: '--test conformance',     threads: 6 }
+          - { tag: default-drained, profile: default, drain: '1', suite: cross_binding, tests: '--test cross_binding',   threads: 6 }
+          # How long a WOPI client waits per operation (Collabora abandons a call after ~3 s).
+          - { tag: relaxed,         profile: relaxed, drain: '',  suite: latency,       tests: '--test wopi_latency',     threads: 1 }
+          - { tag: default,         profile: default, drain: '',  suite: latency,       tests: '--test wopi_latency',     threads: 1 }
+          - { tag: default-drained, profile: default, drain: '1', suite: latency,       tests: '--test wopi_latency',     threads: 1 }
     defaults:
       run:
         working-directory: tools/collab-spike
@@ -252,15 +312,15 @@ jobs:
           workspaces: tools/collab-spike
           shared-key: collab-spike-interop
       - name: Output directory
-        run: mkdir -p "$GITHUB_WORKSPACE/interop-logs"
-      # collabora_over_matrix is built here (so a compile error shows up in this
-      # job) but only run by the `collabora` job: it needs a Collabora.
+        run: mkdir -p "$GITHUB_WORKSPACE/out"
       - name: Build tests
-        run: cargo test -p dcp-interop --no-run --locked
-
-      # A test that needs Synapse must fail without one, and skip only when
-      # told to, saying so. Checked here, before any Synapse is running.
+        run: |
+          rustc --version
+          cargo test -p dcp-interop --no-run --locked
+      # A test that needs Synapse must fail without one, and skip only when told to, saying so.
+      # Checked once, before any Synapse is running.
       - name: Fails loudly without a Synapse
+        if: ${{ matrix.tag == 'relaxed' && matrix.suite == 'conformance' }}
         run: |
           if env -u DCP_SYNAPSE_URL -u DCP_SKIP_SYNAPSE cargo test -p dcp-interop --locked --test conformance -- --nocapture > "$RUNNER_TEMP/nosyn.log" 2>&1; then
             cat "$RUNNER_TEMP/nosyn.log"
@@ -269,32 +329,92 @@ jobs:
           fi
           grep -q "DCP_SYNAPSE_URL is not set" "$RUNNER_TEMP/nosyn.log"
       - name: DCP_SKIP_SYNAPSE=1 skips explicitly and says so
+        if: ${{ matrix.tag == 'relaxed' && matrix.suite == 'conformance' }}
         env:
           DCP_SKIP_SYNAPSE: '1'
         run: |
           env -u DCP_SYNAPSE_URL cargo test -p dcp-interop --locked -- --nocapture 2>&1 | tee "$RUNNER_TEMP/synskip.log"
           grep -q "SKIPPED (DCP_SKIP_SYNAPSE=1)" "$RUNNER_TEMP/synskip.log"
-
-      - name: Conformance, cross-binding checks and negative controls (Synapse, relaxed)
+      - name: ${{ matrix.suite }} on Synapse (${{ matrix.tag }})
+        env:
+          DCP_MEASURE_OUT: ${{ github.workspace }}/out/${{ matrix.tag }}-${{ matrix.suite }}.jsonl
+          DCP_DRAIN_BURST: ${{ matrix.drain }}
         run: |
           set -euo pipefail
-          eval "$(scripts/synapse-up.sh relaxed)"
-          trap 'docker logs "$DCP_SYNAPSE_CONTAINER" > "$GITHUB_WORKSPACE/interop-logs/synapse.log" 2>&1 || true; scripts/synapse-down.sh relaxed' EXIT
-          cargo test -p dcp-interop --locked --no-fail-fast --test conformance --test cross_binding --test negative_control -- --nocapture 2>&1 | tee "$GITHUB_WORKSPACE/interop-logs/interop.log"
-
-      - name: Upload logs
+          eval "$(scripts/synapse-up.sh ${{ matrix.profile }})"
+          trap 'docker logs "$DCP_SYNAPSE_CONTAINER" > "$GITHUB_WORKSPACE/out/synapse-${{ matrix.tag }}-${{ matrix.suite }}.log" 2>&1 || true; scripts/synapse-down.sh ${{ matrix.profile }}' EXIT
+          echo "Synapse $DCP_SYNAPSE_VERSION, profile $DCP_SYNAPSE_PROFILE, image $DCP_SYNAPSE_IMAGE_ID"
+          cargo test -p dcp-interop --locked --no-fail-fast ${{ matrix.tests }} -- --nocapture --test-threads=${{ matrix.threads }} 2>&1 | tee "$GITHUB_WORKSPACE/out/${{ matrix.tag }}-${{ matrix.suite }}.log"
+      - name: Timings
+        if: ${{ !cancelled() }}
+        run: grep -h "^TIMING\|^LATENCY" "$GITHUB_WORKSPACE/out/${{ matrix.tag }}-${{ matrix.suite }}.log" | sort -k2,3 || true
+      - name: Upload
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
-          name: interop-logs
-          path: interop-logs/
+          name: interop-${{ matrix.tag }}-${{ matrix.suite }}
+          path: out/
+          if-no-files-found: warn
+
+  lease-race:
+    name: lease race (${{ matrix.profile }}, 200 rounds)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      matrix:
+        profile: [relaxed, default]
+    defaults:
+      run:
+        working-directory: tools/collab-spike
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          workspaces: tools/collab-spike
+          shared-key: collab-spike-interop
+      - name: Output directory
+        run: mkdir -p "$GITHUB_WORKSPACE/out"
+      - name: Build tests
+        run: cargo test -p dcp-interop --test lease_race --no-run --locked
+      - name: Fails loudly without a Synapse
+        run: |
+          if env -u DCP_SYNAPSE_URL -u DCP_SKIP_SYNAPSE cargo test -p dcp-interop --locked --test lease_race -- --nocapture > "$RUNNER_TEMP/nosyn.log" 2>&1; then
+            cat "$RUNNER_TEMP/nosyn.log"
+            echo "::error::lease_race passed with no Synapse"
+            exit 1
+          fi
+          grep -q "DCP_SYNAPSE_URL is not set" "$RUNNER_TEMP/nosyn.log"
+      - name: 200 forced races (and the tolerance probe) on Synapse (${{ matrix.profile }})
+        env:
+          DCP_RACE_ROUNDS: '200'
+          DCP_MEASURE_OUT: ${{ github.workspace }}/out/race-${{ matrix.profile }}.jsonl
+        run: |
+          set -euo pipefail
+          eval "$(scripts/synapse-up.sh ${{ matrix.profile }})"
+          trap 'docker logs "$DCP_SYNAPSE_CONTAINER" > "$GITHUB_WORKSPACE/out/synapse-race-${{ matrix.profile }}.log" 2>&1 || true; scripts/synapse-down.sh ${{ matrix.profile }}' EXIT
+          echo "Synapse $DCP_SYNAPSE_VERSION, profile $DCP_SYNAPSE_PROFILE, image $DCP_SYNAPSE_IMAGE_ID"
+          cargo test -p dcp-interop --locked --no-fail-fast --test lease_race -- --nocapture --test-threads=2 2>&1 | tee "$GITHUB_WORKSPACE/out/race-${{ matrix.profile }}.log"
+      - name: Summary
+        if: ${{ !cancelled() }}
+        run: grep -h "^LEASE-RACE SUMMARY\|^TOLERANCE" "$GITHUB_WORKSPACE/out/race-${{ matrix.profile }}.log" || true
+      - name: Upload
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: lease-race-${{ matrix.profile }}
+          path: out/
           if-no-files-found: warn
 
   changes:
-    name: does this pull request touch dcp-wopi?
+    name: does this pull request touch dcp-wopi or dcp-interop?
     runs-on: ubuntu-24.04
     outputs:
-      wopi: ${{ steps.f.outputs.wopi }}
+      collabora: ${{ steps.f.outputs.collabora }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -304,18 +424,18 @@ jobs:
           EVENT: ${{ github.event_name }}
           BASE_REF: ${{ github.base_ref }}
         run: |
-          wopi=false
-          if [ "$EVENT" = pull_request ] && git diff --name-only "origin/$BASE_REF...HEAD" | grep -q '^tools/collab-spike/dcp-wopi/'; then
-            wopi=true
+          collabora=false
+          if [ "$EVENT" = pull_request ] && git diff --name-only "origin/$BASE_REF...HEAD" | grep -qE '^tools/collab-spike/(dcp-wopi|dcp-interop)/'; then
+            collabora=true
           fi
-          echo "wopi=$wopi" >> "$GITHUB_OUTPUT"
+          echo "collabora=$collabora" >> "$GITHUB_OUTPUT"
 
   collabora:
-    name: real Collabora Online round trip
+    name: real Collabora Online (round trips and session churn)
     needs: changes
-    if: ${{ github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' || needs.changes.outputs.wopi == 'true' || contains(github.event.head_commit.message, '[collabora]') }}
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' || needs.changes.outputs.collabora == 'true' || contains(github.event.head_commit.message, '[collabora]') }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 40
+    timeout-minutes: 150
     defaults:
       run:
         working-directory: tools/collab-spike
@@ -329,10 +449,12 @@ jobs:
         with:
           workspaces: tools/collab-spike
           shared-key: collab-spike-collabora
+      - name: Output directory
+        run: mkdir -p "$GITHUB_WORKSPACE/out"
       - name: Build the Collabora tests
         run: |
           cargo test -p dcp-wopi --test collabora_e2e --no-run --locked
-          cargo test -p dcp-interop --test collabora_over_matrix --no-run --locked
+          cargo test -p dcp-interop --test collabora_over_matrix --test collabora_churn --no-run --locked
       - name: Start Collabora Online
         run: |
           docker pull collabora/code:latest
@@ -357,6 +479,86 @@ jobs:
           trap 'docker logs "$DCP_SYNAPSE_CONTAINER" > "$RUNNER_TEMP/synapse.log" 2>&1 || true; scripts/synapse-down.sh relaxed' EXIT
           free -m
           cargo test -p dcp-interop --locked --test collabora_over_matrix -- --nocapture --test-threads=1 2>&1 | tee "$RUNNER_TEMP/collabora-over-matrix.log"
+      # Collabora's own timers: nothing but the aliasgroup and TLS-off is overridden.
+      - name: Churn, Collabora's own timers (nothing overridden but TLS and the alias group)
+        env:
+          DCP_WOPI_HOST_PORT: '18080'
+          DCP_MEASURE_OUT: ${{ github.workspace }}/out/churn.jsonl
+          DCP_CHURN_LABEL: stock
+          DCP_COLLABORA_WAIT_SECS: '120'
+        run: |
+          set -euo pipefail
+          COLLABORA_LOCK_REFRESH_SECS=default ./scripts/collabora-up.sh
+          echo "timers in the container's coolwsd.xml (the image has no shell, so the file is copied out):"
+          docker cp dcp-collabora:/etc/coolwsd/coolwsd.xml "$RUNNER_TEMP/coolwsd.xml"
+          grep -n -i "autosave\|idlesave\|refresh\|<locking" "$RUNNER_TEMP/coolwsd.xml" | tee "$GITHUB_WORKSPACE/out/collabora-stock-config.txt" || true
+          docker exec dcp-collabora coolwsd --version 2>&1 | head -3 || true
+          eval "$(scripts/synapse-up.sh default)"
+          trap 'docker logs "$DCP_SYNAPSE_CONTAINER" > "$GITHUB_WORKSPACE/out/synapse-stock.log" 2>&1 || true; docker logs dcp-collabora > "$GITHUB_WORKSPACE/out/collabora-stock.log" 2>&1 || true; scripts/synapse-down.sh default' EXIT
+          echo "Synapse $DCP_SYNAPSE_VERSION, profile $DCP_SYNAPSE_PROFILE, image $DCP_SYNAPSE_IMAGE_ID"
+          free -m
+          cargo test -p dcp-interop --locked --test collabora_churn -- --nocapture --test-threads=1 2>&1 | tee "$GITHUB_WORKSPACE/out/churn-stock.log"
+      # What a deployment that wants saves to be frequent might configure.
+      - name: Churn, tightened timers (autosave 30 s, idle save 10 s, lock refresh 60 s as configured)
+        if: ${{ !cancelled() }}
+        env:
+          DCP_WOPI_HOST_PORT: '18080'
+          DCP_MEASURE_OUT: ${{ github.workspace }}/out/churn.jsonl
+          DCP_CHURN_LABEL: tight
+          DCP_COLLABORA_WAIT_SECS: '120'
+          COLLABORA_LOCK_REFRESH_SECS: '60'
+          COLLABORA_EXTRA_PARAMS: '--o:per_document.autosave_duration_secs=30 --o:per_document.idlesave_duration_secs=10'
+        run: |
+          set -euo pipefail
+          ./scripts/collabora-up.sh
+          eval "$(scripts/synapse-up.sh default)"
+          trap 'docker logs "$DCP_SYNAPSE_CONTAINER" > "$GITHUB_WORKSPACE/out/synapse-tight.log" 2>&1 || true; docker logs dcp-collabora > "$GITHUB_WORKSPACE/out/collabora-tight.log" 2>&1 || true; scripts/synapse-down.sh default' EXIT
+          echo "Synapse $DCP_SYNAPSE_VERSION, profile $DCP_SYNAPSE_PROFILE, image $DCP_SYNAPSE_IMAGE_ID"
+          cargo test -p dcp-interop --locked --test collabora_churn -- --nocapture --test-threads=1 2>&1 | tee "$GITHUB_WORKSPACE/out/churn-tight.log"
+      # Far beyond Collabora's own timers, to find where the limit bites. Measured, not required to finish cleanly.
+      - name: Churn, aggressive timers (autosave 5 s, idle save 3 s, lock refresh 10 s), stress mode
+        if: ${{ !cancelled() }}
+        env:
+          DCP_WOPI_HOST_PORT: '18080'
+          DCP_MEASURE_OUT: ${{ github.workspace }}/out/churn.jsonl
+          DCP_CHURN_LABEL: aggressive
+          DCP_CHURN_STRESS: '1'
+          DCP_COLLABORA_WAIT_SECS: '120'
+          COLLABORA_LOCK_REFRESH_SECS: '10'
+          COLLABORA_EXTRA_PARAMS: '--o:per_document.autosave_duration_secs=5 --o:per_document.idlesave_duration_secs=3'
+        run: |
+          set -euo pipefail
+          ./scripts/collabora-up.sh
+          eval "$(scripts/synapse-up.sh default)"
+          trap 'docker logs "$DCP_SYNAPSE_CONTAINER" > "$GITHUB_WORKSPACE/out/synapse-aggressive.log" 2>&1 || true; docker logs dcp-collabora > "$GITHUB_WORKSPACE/out/collabora-aggressive.log" 2>&1 || true; scripts/synapse-down.sh default' EXIT
+          echo "Synapse $DCP_SYNAPSE_VERSION, profile $DCP_SYNAPSE_PROFILE, image $DCP_SYNAPSE_IMAGE_ID"
+          cargo test -p dcp-interop --locked --test collabora_churn -- --nocapture --test-threads=1 2>&1 | tee "$GITHUB_WORKSPACE/out/churn-aggressive.log"
+      # The same aggressive timers for an editor whose message budget is already spent: the homeserver's limit is the binding one.
+      - name: Churn, aggressive timers, editor's message budget spent first, stress mode
+        if: ${{ !cancelled() }}
+        env:
+          DCP_WOPI_HOST_PORT: '18080'
+          DCP_MEASURE_OUT: ${{ github.workspace }}/out/churn.jsonl
+          DCP_CHURN_LABEL: aggressive-drained
+          DCP_CHURN_STRESS: '1'
+          DCP_DRAIN_BURST: '1'
+          DCP_COLLABORA_WAIT_SECS: '120'
+          COLLABORA_LOCK_REFRESH_SECS: '10'
+          COLLABORA_EXTRA_PARAMS: '--o:per_document.autosave_duration_secs=5 --o:per_document.idlesave_duration_secs=3'
+        run: |
+          set -euo pipefail
+          ./scripts/collabora-up.sh
+          eval "$(scripts/synapse-up.sh default)"
+          trap 'docker logs "$DCP_SYNAPSE_CONTAINER" > "$GITHUB_WORKSPACE/out/synapse-aggressive-drained.log" 2>&1 || true; docker logs dcp-collabora > "$GITHUB_WORKSPACE/out/collabora-aggressive-drained.log" 2>&1 || true; scripts/synapse-down.sh default' EXIT
+          echo "Synapse $DCP_SYNAPSE_VERSION, profile $DCP_SYNAPSE_PROFILE, image $DCP_SYNAPSE_IMAGE_ID"
+          cargo test -p dcp-interop --locked --test collabora_churn -- --nocapture --test-threads=1 2>&1 | tee "$GITHUB_WORKSPACE/out/churn-aggressive-drained.log"
+      - name: Summary
+        if: ${{ !cancelled() }}
+        run: |
+          grep -h "^CHURN" "$GITHUB_WORKSPACE"/out/churn-*.log || true
+          echo "--- what Collabora logged about the WOPI host timing out"
+          for f in "$GITHUB_WORKSPACE"/out/collabora-*.log; do echo "$f: $(grep -c 'CheckTimeout' "$f") CheckTimeout lines"; done
+          grep -h "CheckTimeout\|Failed to UNLOCK\|No session left to unlock\|Un-successful" "$GITHUB_WORKSPACE"/out/collabora-*.log | cut -c1-300 || true
       - name: Collabora container log
         if: always()
         run: docker logs dcp-collabora > "$RUNNER_TEMP/collabora.log" 2>&1 || true
@@ -371,4 +573,530 @@ jobs:
             ${{ runner.temp }}/collabora-over-matrix.log
             ${{ runner.temp }}/synapse.log
             ${{ runner.temp }}/collabora.log
+            out/
+          if-no-files-found: warn
+
+  streams:
+    name: dcp-streams against Durable Streams servers (Node 0.3.9, Go, basic_auth)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    env:
+      # The one test that needs a server with access control has its own step below.
+      DCP_SKIP_STREAMS_AUTH: '1'
+    defaults:
+      run:
+        working-directory: tools/collab-spike
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          workspaces: tools/collab-spike
+          shared-key: collab-spike-streams
+
+      - name: Output directory
+        run: mkdir -p "$GITHUB_WORKSPACE/streams-logs"
+
+      - name: Versions
+        run: |
+          rustc --version
+          cargo --version
+          node --version
+          npm --version
+          uname -a
+          nproc
+          free -m
+
+      - name: Install the pinned reference server (npm ci)
+        working-directory: tools/collab-spike/scripts/streams-server
+        run: |
+          npm ci --no-audit --no-fund
+          node -e 'console.log("@durable-streams/server", require("./node_modules/@durable-streams/server/package.json").version, "client", require("./node_modules/@durable-streams/client/package.json").version)'
+
+      - name: Build tests
+        run: cargo test -p dcp-streams --no-run --locked
+
+      # A test that needs a server must fail without one, and skip only when told to, saying so.
+      - name: Fails loudly without a server
+        run: |
+          if env -u DCP_STREAMS_URL -u DCP_SKIP_STREAMS cargo test -p dcp-streams --locked --test streams spec_section_12 -- --nocapture > "$RUNNER_TEMP/noserver.log" 2>&1; then
+            cat "$RUNNER_TEMP/noserver.log"
+            echo "::error::dcp-streams passed with no server"
+            exit 1
+          fi
+          grep -q "DCP_STREAMS_URL is not set" "$RUNNER_TEMP/noserver.log"
+      - name: DCP_SKIP_STREAMS=1 skips explicitly and says so
+        env:
+          DCP_SKIP_STREAMS: '1'
+        run: |
+          env -u DCP_STREAMS_URL cargo test -p dcp-streams --locked --test streams -- --nocapture 2>&1 | tee "$RUNNER_TEMP/skip.log"
+          grep -q "SKIPPED .*(DCP_SKIP_STREAMS=1)" "$RUNNER_TEMP/skip.log"
+
+      # ---------------------------------------------------------------- Node reference server
+      - name: Unit tests (crypto, wire, rules)
+        run: cargo test -p dcp-streams --locked --lib -- --nocapture
+
+      - name: Node reference server, file-backed - conformance journeys, properties, restart
+        env:
+          DCP_STREAMS_LABEL: node reference server 0.3.9
+          DCP_MEASURE_OUT: ${{ github.workspace }}/streams-logs/measure-node.jsonl
+        run: |
+          set -euo pipefail
+          eval "$(scripts/streams-up.sh node)"
+          trap 'cp "$DCP_STREAMS_LOG" "$GITHUB_WORKSPACE/streams-logs/node-server.log" 2>/dev/null || true; scripts/streams-down.sh node' EXIT
+          cargo test -p dcp-streams --locked --test streams --no-fail-fast -- --nocapture --test-threads=2 2>&1 | tee "$GITHUB_WORKSPACE/streams-logs/node-tests.log"
+
+      # ---------------------------------------------------------------- Go server, same suite
+      - name: Go server (Caddy plugin) v0.3.0, file-backed - conformance journeys and properties
+        env:
+          DCP_STREAMS_LABEL: go server (caddy plugin) 0.3.0
+        run: |
+          set -euo pipefail
+          eval "$(STREAMS_PORT=4438 scripts/streams-up.sh caddy)"
+          trap 'cp "$DCP_STREAMS_LOG" "$GITHUB_WORKSPACE/streams-logs/caddy-server.log" 2>/dev/null || true; STREAMS_PORT=4438 scripts/streams-down.sh caddy' EXIT
+          cargo test -p dcp-streams --locked --test streams --no-fail-fast -- --nocapture --test-threads=2 --skip restart 2>&1 | tee "$GITHUB_WORKSPACE/streams-logs/caddy-tests.log"
+
+      # ---------------------------------------------------------------- what a gate in front can do
+      - name: Go server behind basic_auth - a gate by credential
+        run: |
+          set -euo pipefail
+          eval "$(STREAMS_PORT=4439 scripts/streams-up.sh caddy-auth)"
+          trap 'cp "$DCP_STREAMS_LOG" "$GITHUB_WORKSPACE/streams-logs/caddy-auth-server.log" 2>/dev/null || true; STREAMS_PORT=4439 scripts/streams-down.sh caddy-auth' EXIT
+          DCP_STREAMS_AUTH_URL="$DCP_STREAMS_URL" env -u DCP_STREAMS_URL cargo test -p dcp-streams --locked --test streams auth:: -- --nocapture 2>&1 | tee "$GITHUB_WORKSPACE/streams-logs/caddy-auth-tests.log"
+
+      - name: Upload logs and measurements
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: streams-logs
+          path: streams-logs/
+          if-no-files-found: warn
+
+  streams-measure:
+    name: streams measurements (release build, Node and Go servers)
+    if: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.measure) || contains(github.event.head_commit.message, '[measure]') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    defaults:
+      run:
+        working-directory: tools/collab-spike
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          workspaces: tools/collab-spike
+          shared-key: collab-spike-streams-release
+
+      - name: Output directory
+        run: mkdir -p "$GITHUB_WORKSPACE/streams-logs"
+
+      - name: Versions
+        run: |
+          rustc --version
+          cargo --version
+          node --version
+          uname -a
+          nproc
+          free -m
+          lscpu | grep -E "Model name|MHz" || true
+
+      - name: Install the pinned reference server (npm ci)
+        working-directory: tools/collab-spike/scripts/streams-server
+        run: npm ci --no-audit --no-fund
+
+      - name: Build the tests in release mode
+        run: cargo test --release --locked -p dcp-streams --test streams --no-run
+
+      - name: Measurements, Node reference server (release build of the client)
+        env:
+          DCP_MEASURE_OUT: ${{ github.workspace }}/streams-logs/measure-node.jsonl
+          DCP_MEASURE_MAX_MB: '512'
+        run: |
+          set -euo pipefail
+          eval "$(scripts/streams-up.sh node)"
+          trap 'cp "$DCP_STREAMS_LOG" "$GITHUB_WORKSPACE/streams-logs/node-server-measure.log" 2>/dev/null || true; scripts/streams-down.sh node' EXIT
+          cargo test --release --locked -p dcp-streams --test streams measure:: -- --ignored --test-threads=1 --nocapture 2>&1 | tee "$GITHUB_WORKSPACE/streams-logs/measure-node.log"
+
+      - name: Measurements, Go server
+        if: ${{ !cancelled() }}
+        env:
+          DCP_MEASURE_OUT: ${{ github.workspace }}/streams-logs/measure-caddy.jsonl
+          DCP_MEASURE_MAX_MB: '512'
+        run: |
+          set -euo pipefail
+          eval "$(STREAMS_PORT=4438 scripts/streams-up.sh caddy)"
+          trap 'cp "$DCP_STREAMS_LOG" "$GITHUB_WORKSPACE/streams-logs/caddy-server-measure.log" 2>/dev/null || true; STREAMS_PORT=4438 scripts/streams-down.sh caddy' EXIT
+          cargo test --release --locked -p dcp-streams --test streams measure:: -- --ignored --test-threads=1 --nocapture 2>&1 | tee "$GITHUB_WORKSPACE/streams-logs/measure-caddy.log"
+
+      - name: Restart and crash timings (release build)
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          DCP_STREAMS_URL=http://127.0.0.1:1/v1/stream/ cargo test --release --locked -p dcp-streams --test streams restart:: -- --nocapture --test-threads=1 2>&1 | tee "$GITHUB_WORKSPACE/streams-logs/restart-release.log"
+
+      - name: Upload measurements
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: streams-measurements
+          path: streams-logs/
+          if-no-files-found: warn
+
+  p2p-upstream:
+    name: p2panda-net 0.7.1 upstream tests, as published
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    continue-on-error: true
+    steps:
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+      - name: Fetch the published crate and run its own e2e test and its sync unit tests
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/up" && cd "$RUNNER_TEMP/up"
+          curl -sSfL https://static.crates.io/crates/p2panda-net/p2panda-net-0.7.1.crate | tar xz
+          cd p2panda-net-0.7.1
+          rustc --version | tee "$GITHUB_WORKSPACE/upstream.txt"
+          # No Cargo.lock ships with the crate: cargo resolves today's newest compatible iroh.
+          { cargo test --features test_utils --test e2e -- --nocapture 2>&1; echo "exit: $?"; } | tee -a "$GITHUB_WORKSPACE/upstream.txt" || true
+          cargo tree -i iroh 2>&1 | head -3 | tee -a "$GITHUB_WORKSPACE/upstream.txt" || true
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        if: always()
+        with:
+          name: spike-c-upstream
+          path: upstream.txt
+          if-no-files-found: warn
+
+  p2p:
+    name: p2p - dcp-p2p journeys and p2p-specific tests (debug build)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    defaults:
+      run:
+        working-directory: tools/collab-spike/dcp-p2p
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          workspaces: tools/collab-spike/dcp-p2p
+          shared-key: collab-spike-p2p-test
+      - name: Output directory
+        run: mkdir -p "$GITHUB_WORKSPACE/results"
+      - name: Build tests
+        run: cargo test --no-run --locked
+      - name: The 512-element header limit (measured)
+        if: always()
+        run: cargo test --locked --test header_limit -- --nocapture --test-threads=1 2>&1 | tee "$GITHUB_WORKSPACE/results/header_limit.log"
+      - name: Spec section 12 journeys through run_all, and the negative control
+        if: always()
+        run: |
+          set -o pipefail
+          cargo test --locked --test conformance -- --nocapture --test-threads=1 2>&1 | tee "$GITHUB_WORKSPACE/results/conformance.log"
+      - name: Tests conformance cannot see
+        if: always()
+        run: |
+          set -o pipefail
+          cargo test --locked --test p2p -- --nocapture --test-threads=1 2>&1 | tee "$GITHUB_WORKSPACE/results/p2p.log"
+      - name: Repeat the timing-sensitive tests ten times (the revocation tests raced twice before the fix)
+        if: always()
+        run: |
+          fails=0
+          for i in $(seq 1 10); do
+            cargo test --locked --test p2p -- content_from_a_member a_revoked_member the_blob_gate a_removed_editor --nocapture --test-threads=1 > "$GITHUB_WORKSPACE/results/repeat-$i.log" 2>&1 || fails=$((fails+1))
+          done
+          for i in 1 2 3; do
+            cargo test --locked --test conformance -- spec_section_12 --nocapture --test-threads=1 > "$GITHUB_WORKSPACE/results/repeat-conformance-$i.log" 2>&1 || fails=$((fails+1))
+          done
+          echo "failing repetitions out of 10 + 3: $fails" | tee "$GITHUB_WORKSPACE/results/repeat-summary.txt"
+          test "$fails" -eq 0
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        if: always()
+        with:
+          name: spike-c-test
+          path: results/
+          if-no-files-found: warn
+
+  p2p-measure:
+    name: p2p measurements (release build)
+    if: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.measure) || contains(github.event.head_commit.message, '[measure]') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    defaults:
+      run:
+        working-directory: tools/collab-spike/dcp-p2p
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          workspaces: tools/collab-spike/dcp-p2p
+          shared-key: collab-spike-p2p-measure
+      - name: Machine
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/results"
+          { rustc --version; cargo --version; nproc; free -m; lscpu | grep 'Model name'; } | tee "$GITHUB_WORKSPACE/results/machine.txt"
+      - name: Measurements
+        run: |
+          set -o pipefail
+          cargo test --release --locked --test measure -- --ignored --test-threads=1 --nocapture 2>&1 | tee "$GITHUB_WORKSPACE/results/measure.log"
+      - name: The p2p tests again in release mode (timings of the offline and partition tests)
+        if: always()
+        run: |
+          set -o pipefail
+          cargo test --release --locked --test p2p -- --nocapture --test-threads=1 2>&1 | tee "$GITHUB_WORKSPACE/results/p2p-release.log"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        if: always()
+        with:
+          name: spike-c-measure
+          path: results/
+          if-no-files-found: warn
+
+  p2p-relay:
+    name: p2p - sync through an in-process iroh relay
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    continue-on-error: true
+    defaults:
+      run:
+        working-directory: tools/collab-spike/dcp-p2p
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          workspaces: tools/collab-spike/dcp-p2p
+          shared-key: collab-spike-p2p-relay
+      - name: Relay test
+        run: |
+          set -o pipefail
+          mkdir -p "$GITHUB_WORKSPACE/results"
+          cargo test --locked --features relay-test --test relay -- --nocapture 2>&1 | tee "$GITHUB_WORKSPACE/results/relay.log"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        if: always()
+        with:
+          name: spike-c-relay
+          path: results/
+          if-no-files-found: warn
+
+  p2p-flatpak:
+    name: p2p - the same nodes inside a Flatpak build sandbox, with and without network
+    needs: p2p
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    continue-on-error: true
+    defaults:
+      run:
+        working-directory: tools/collab-spike/dcp-p2p
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          workspaces: tools/collab-spike/dcp-p2p
+          shared-key: collab-spike-p2p-test
+      - name: Flatpak and the GNOME-style runtime
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/results"
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq flatpak
+          # Ubuntu 24.04 restricts unprivileged user namespaces, which bwrap needs.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          flatpak --version | tee "$GITHUB_WORKSPACE/results/flatpak.txt"
+          flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+          flatpak install --user -y --noninteractive flathub org.freedesktop.Platform//24.08 org.freedesktop.Sdk//24.08
+      - name: Build the test binary
+        run: |
+          set -euo pipefail
+          BIN=$(cargo test --locked --test p2p --no-run --message-format=json 2>/dev/null | jq -r 'select(.profile.test==true and .target.name=="p2p") | .executable' | tail -1)
+          mkdir -p "$RUNNER_TEMP/bin" && cp "$BIN" "$RUNNER_TEMP/bin/p2p"
+          ls -l "$RUNNER_TEMP/bin"
+      - name: Run it inside the sandbox
+        run: |
+          set -uo pipefail
+          flatpak build-init "$RUNNER_TEMP/app" org.tunaos.P2pProbe org.freedesktop.Sdk org.freedesktop.Platform 24.08
+          run() { # run <label> <flatpak build options...>
+            label=$1; shift
+            echo "=== $label" | tee -a "$GITHUB_WORKSPACE/results/flatpak.txt"
+            flatpak build "$@" --filesystem="$RUNNER_TEMP/bin" "$RUNNER_TEMP/app" sh -c 'echo "-- interfaces seen by the sandbox:"; cat /proc/net/dev | tail -n +3 | cut -d: -f1; echo "-- test:"; '"$RUNNER_TEMP"'/bin/p2p a_peer_offline_during_publishes_catches_up_on_reconnect --nocapture --test-threads=1 2>&1 | tail -15' 2>&1 | tee -a "$GITHUB_WORKSPACE/results/flatpak.txt"
+          }
+          run "--unshare=network (no network permission)" --unshare=network
+          run "--share=network" --share=network
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        if: always()
+        with:
+          name: spike-c-flatpak
+          path: results/
+          if-no-files-found: warn
+
+  webdav-probe:
+    name: Nextcloud protocol probe (two Nextcloud ${{ matrix.version }} instances)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - version: '34.0.5'
+            image: docker.io/library/nextcloud:34.0.5-apache@sha256:1f9212adecae32010cdbf137d7e0db78d08c696dc3e77f1eddcbf902d10209b4
+          - version: '35.0.2'
+            image: docker.io/library/nextcloud:35.0.2-apache@sha256:89af7ee7a96ff5e9668280566209268ae6b2d02327f6ef6d56f6d68228cf9431
+    env:
+      NEXTCLOUD_IMAGE: ${{ matrix.image }}
+    defaults:
+      run:
+        working-directory: tools/collab-spike
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Versions
+        run: |
+          docker --version
+          echo "$NEXTCLOUD_IMAGE"
+          echo "$POSTGRES_IMAGE"
+      - name: Start two Nextcloud instances
+        run: scripts/nextcloud-up.sh a b 2>&1 | tee "$RUNNER_TEMP/up.log"
+      - name: Probe
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/measurements"
+          PROBE_OUT="$GITHUB_WORKSPACE/measurements/probe" scripts/nextcloud-probe.sh 2>&1 | tee "$GITHUB_WORKSPACE/measurements/probe.log"
+      - name: Without the files_lock app, LOCK is not implemented
+        run: |
+          grep -A1 '^=== \[nolock-lock\]' "$GITHUB_WORKSPACE/measurements/probe.log" | grep -q 'status: 501'
+          grep -A1 '^=== \[lock-core-lock\]' "$GITHUB_WORKSPACE/measurements/probe.log" | grep -q 'status: 200'
+      - name: Container logs
+        if: always()
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/measurements"
+          for c in nc-a nc-b; do
+            docker logs "$c" > "$GITHUB_WORKSPACE/measurements/$c.docker.log" 2>&1 || true
+            docker exec "$c" cat /var/www/html/data/nextcloud.log > "$GITHUB_WORKSPACE/measurements/$c.nextcloud.log" 2>&1 || true
+          done
+          cp "$RUNNER_TEMP/up.log" "$GITHUB_WORKSPACE/measurements/up.log" || true
+      - name: Upload measurements
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: nextcloud-probe-${{ matrix.version }}
+          path: measurements/
+          if-no-files-found: warn
+
+  webdav:
+    name: dcp-webdav against Nextcloud ${{ matrix.version }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - version: '34.0.5'
+            image: docker.io/library/nextcloud:34.0.5-apache@sha256:1f9212adecae32010cdbf137d7e0db78d08c696dc3e77f1eddcbf902d10209b4
+          - version: '35.0.2'
+            image: docker.io/library/nextcloud:35.0.2-apache@sha256:89af7ee7a96ff5e9668280566209268ae6b2d02327f6ef6d56f6d68228cf9431
+    defaults:
+      run:
+        working-directory: tools/collab-spike
+    env:
+      NEXTCLOUD_IMAGE: ${{ matrix.image }}
+      DCP_MEASURE_OUT: ${{ github.workspace }}/measurements/measure.jsonl
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          workspaces: tools/collab-spike
+          shared-key: collab-spike-webdav
+      - name: Versions
+        run: |
+          rustc --version
+          cargo --version
+          docker --version
+          echo "$NEXTCLOUD_IMAGE"
+          echo "$POSTGRES_IMAGE"
+          echo "git $(git rev-parse HEAD)"
+      - name: Build
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/measurements"
+          cargo test -p dcp-webdav --locked --no-run
+      - name: Unit tests (the multistatus reader)
+        run: cargo test -p dcp-webdav --locked --lib -- --nocapture
+      - name: A test that needs Nextcloud FAILS when it is missing
+        # No Nextcloud runs yet. The step passes only if cargo test fails AND says why.
+        env:
+          DCP_NEXTCLOUD_A_URL: http://127.0.0.1:9
+        run: |
+          if cargo test -p dcp-webdav --locked --test conformance_over_nextcloud -- --nocapture > "$RUNNER_TEMP/missing.log" 2>&1; then
+            cat "$RUNNER_TEMP/missing.log"
+            echo "::error::the conformance test passed with no Nextcloud running"
+            exit 1
+          fi
+          grep -q "Nextcloud is not reachable" "$RUNNER_TEMP/missing.log"
+      - name: DCP_SKIP_NEXTCLOUD=1 skips explicitly and says so
+        env:
+          DCP_SKIP_NEXTCLOUD: '1'
+        run: |
+          cargo test -p dcp-webdav --locked --test conformance_over_nextcloud -- --nocapture 2>&1 | tee "$RUNNER_TEMP/skip.log"
+          test "$(grep -c '^SKIPPED ' "$RUNNER_TEMP/skip.log")" -eq 3
+      - name: Start two Nextcloud instances
+        run: scripts/nextcloud-up.sh a b 2>&1 | tee "$RUNNER_TEMP/up.log"
+      - name: Conformance journeys on one Nextcloud
+        shell: bash
+        run: cargo test -p dcp-webdav --locked --test conformance_over_nextcloud -- --nocapture --test-threads=1 2>&1 | tee "$GITHUB_WORKSPACE/measurements/conformance-one.log"
+      - name: Conformance journeys across a federation (alice on A, bob and carol on B)
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: cargo test -p dcp-webdav --locked --test conformance_over_ocm -- --nocapture --test-threads=1 2>&1 | tee "$GITHUB_WORKSPACE/measurements/conformance-federated.log"
+      - name: Semantics (ETags, locks, versions, properties, sharing, authorship, clock, latency)
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: cargo test -p dcp-webdav --locked --test nextcloud_semantics -- --nocapture --test-threads=1 2>&1 | tee "$GITHUB_WORKSPACE/measurements/semantics.log"
+      - name: OCM (discovery, a receiver holding only the share secret, locks across a federation)
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: cargo test -p dcp-webdav --locked --test federation -- --nocapture --test-threads=1 2>&1 | tee "$GITHUB_WORKSPACE/measurements/federation.log"
+      - name: Spec test 5 with the lease duration as a parameter (4 s and 20 s, both topologies)
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: cargo test -p dcp-webdav --locked --test lease_timing -- --nocapture --test-threads=1 2>&1 | tee "$GITHUB_WORKSPACE/measurements/lease-timing.log"
+      - name: Container logs
+        if: always()
+        run: |
+          for c in nc-a nc-b; do
+            docker logs "$c" > "$GITHUB_WORKSPACE/measurements/$c.docker.log" 2>&1 || true
+            docker exec "$c" cat /var/www/html/data/nextcloud.log > "$GITHUB_WORKSPACE/measurements/$c.nextcloud.log" 2>&1 || true
+          done
+          cp "$RUNNER_TEMP/up.log" "$GITHUB_WORKSPACE/measurements/up.log" || true
+      - name: Upload measurements
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: webdav-measurements-${{ matrix.version }}
+          path: measurements/
           if-no-files-found: warn

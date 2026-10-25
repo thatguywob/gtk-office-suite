@@ -24,14 +24,8 @@ async fn journeys_over_a_federation() {
         "unknown_algorithm_falls_back_to_versions",
         "update_stream_gap_recovery",
     ]);
-    // `lease_expiry_releases` is the one journey whose clock a federation strains: it
-    // needs the renewal and its read-backs to fit in 0.5 s after the record's own
-    // timestamp, and every operation is two server hops. It failed in most
-    // federated runs and passed in some; `tests/lease_timing.rs` runs it with the
-    // duration as a parameter and requires 20 s to pass. Everything else MUST pass.
-    let failed = report.failed();
-    assert!(
-        failed.iter().all(|n| *n == "lease_expiry_releases"),
-        "only lease_expiry_releases may fail over a federation: {failed:?}\n{report}"
-    );
+    // Every journey passes, `lease_expiry_releases` included: the federated fixture sets
+    // `Fixture::lease_ms` to FEDERATED_LEASE_MS, because at the default 4 s two server hops per
+    // operation do not fit the journey's clock (`tests/lease_timing.rs` measures both).
+    report.assert_no_failures();
 }

@@ -45,7 +45,7 @@ async fn pair() -> (Arc<P2pStore>, Arc<P2pStore>, String) {
 /// QUIC connect plus the first sync session between two fresh nodes on loopback, against a second
 /// session over the connection that is already open.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore]
+#[ignore = "measurement"]
 async fn connect_time_on_loopback() {
     let mut cold = Vec::new();
     let mut warm = Vec::new();
@@ -81,7 +81,7 @@ async fn connect_time_on_loopback() {
 /// N small entries (inline updates of 100 bytes): how long they take to publish at the writer, to
 /// reach a second node, and what each costs on the wire.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore]
+#[ignore = "measurement"]
 async fn convergence_of_n_entries() {
     for n in [10usize, 100, 300, 1000] {
         let (a, b, doc) = pair().await;
@@ -117,7 +117,7 @@ async fn convergence_of_n_entries() {
 
 /// A third node joins late and pulls everything in one session: wire bytes per operation.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore]
+#[ignore = "measurement"]
 async fn late_joiner_pulls_n_entries_in_one_session() {
     for n in [100usize, 300] {
         let (a, b, doc) = pair().await;
@@ -157,7 +157,7 @@ async fn late_joiner_pulls_n_entries_in_one_session() {
 
 /// Files: the writer's time to seal, store and verify, and the reader's fetch (iroh-blobs).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore]
+#[ignore = "measurement"]
 async fn blob_transfer_1_and_32_mib() {
     for mib in [1usize, 32] {
         let (a, b, doc) = pair().await;
@@ -200,7 +200,7 @@ async fn blob_transfer_1_and_32_mib() {
 /// How long a lease write takes to show at another node: what the settle interval of lease rule 3
 /// has to cover on this binding (the anti-entropy interval is 200 ms; a write triggers a push).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore]
+#[ignore = "measurement"]
 async fn lease_propagation_latency() {
     let (a, b, doc) = pair().await;
     let base = a.versions(&doc).await.unwrap().remove(0).id;

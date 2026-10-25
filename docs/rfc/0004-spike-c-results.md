@@ -1,6 +1,6 @@
 # RFC-0004 Spike C: iroh and p2panda binding results
 
-Date: 2026-10-24 · Tracks: [RFC-0004](0004-interoperable-document-collaboration.md), [DCP draft 1 §8.4](../DOCUMENT-COLLABORATION-SPEC.md) · Code: [`tools/collab-spike/dcp-p2p/`](../../tools/collab-spike/dcp-p2p/) (branch `spike/collab-c`) · Workflow: [`collab-spike-c.yml`](../../.github/workflows/collab-spike-c.yml) · Raw data: CI artifacts `spike-c-check`, `spike-c-test`, `spike-c-measure`, `spike-c-relay`, `spike-c-flatpak`, `spike-c-upstream` of run [40139997921](https://github.com/tuna-os/gtk-office-suite/actions/runs/40139997921)
+Date: 2026-10-24 · Tracks: [RFC-0004](0004-interoperable-document-collaboration.md), [DCP draft 1 §8.4](../DOCUMENT-COLLABORATION-SPEC.md) · Code: [`tools/collab-spike/dcp-p2p/`](../../tools/collab-spike/dcp-p2p/) (branch `spike/collab-c`) · Workflow: [`collab-spike.yml`](../../.github/workflows/collab-spike.yml) · Raw data: CI artifacts `spike-c-check`, `spike-c-test`, `spike-c-measure`, `spike-c-relay`, `spike-c-flatpak`, `spike-c-upstream` of run [40139997921](https://github.com/tuna-os/gtk-office-suite/actions/runs/40139997921)
 
 **Every number here comes from CI runs on a shared 4-vCPU GitHub-hosted runner (AMD EPYC 9V74,
 16 GB, rustc 1.99.1) with all nodes on loopback, in one process or one sandbox.** There was no WAN

@@ -74,7 +74,7 @@ fn byte_pos(offset: &str) -> u64 {
 // ------------------------------------------------------------------ latency
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore]
+#[ignore = "measurement"]
 async fn latency_append_to_a_second_client() {
     let base = require_streams!();
     let rig = Rig::new(&base).await;
@@ -170,7 +170,7 @@ async fn latency_append_to_a_second_client() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore]
+#[ignore = "measurement"]
 async fn latency_of_the_server_alone_for_a_bare_append() {
     let base = require_streams!();
     let http = Http::new(&base);
@@ -192,7 +192,7 @@ async fn latency_of_the_server_alone_for_a_bare_append() {
 // ------------------------------------------------------------------ catch-up
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore]
+#[ignore = "measurement"]
 async fn catch_up_time_for_n_updates_with_and_without_a_snapshot() {
     let base = require_streams!();
     for n in [100usize, 1000, 5000] {
@@ -276,7 +276,7 @@ async fn catch_up_time_for_n_updates_with_and_without_a_snapshot() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore]
+#[ignore = "measurement"]
 async fn catch_up_time_for_n_versions() {
     let base = require_streams!();
     for n in [50usize, 200, 500] {
@@ -343,7 +343,7 @@ async fn catch_up_time_for_n_versions() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore]
+#[ignore = "measurement"]
 async fn catch_up_across_many_epochs() {
     let base = require_streams!();
     let rig = Rig::new(&base).await;
@@ -407,7 +407,7 @@ async fn catch_up_across_many_epochs() {
 // ------------------------------------------------------------------ overhead
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore]
+#[ignore = "measurement"]
 async fn record_overhead_in_bytes() {
     let base = require_streams!();
     let rig = Rig::new(&base).await;
@@ -514,7 +514,7 @@ async fn alive(base: &str) -> bool {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore]
+#[ignore = "measurement"]
 async fn the_largest_record_and_file_the_server_accepts() {
     let base = require_streams!();
     let http = Http::new(&base);
@@ -601,7 +601,7 @@ async fn the_largest_record_and_file_the_server_accepts() {
 // ------------------------------------------------------------------ time
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore]
+#[ignore = "measurement"]
 async fn the_clock_before_and_after_calibration() {
     let base = require_streams!();
     let mut cold = Vec::new();
@@ -629,7 +629,7 @@ async fn the_clock_before_and_after_calibration() {
 // ------------------------------------------------------------------ cost of the lease protocol
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore]
+#[ignore = "measurement"]
 async fn lease_acquire_and_renew_latency() {
     let base = require_streams!();
     let rig = Rig::new(&base).await;

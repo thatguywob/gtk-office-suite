@@ -1,6 +1,6 @@
 # RFC-0004 Spike E: OCM and WebDAV binding results
 
-Date: 2026-10-24 · Tracks: [RFC-0004](0004-interoperable-document-collaboration.md), spec [section 8.3](../DOCUMENT-COLLABORATION-SPEC.md) · Code: [`tools/collab-spike/dcp-webdav/`](../../tools/collab-spike/dcp-webdav/), [`scripts/nextcloud-*.sh`](../../tools/collab-spike/scripts/), workflow [`collab-spike-e.yml`](../../.github/workflows/collab-spike-e.yml)
+Date: 2026-10-24 · Tracks: [RFC-0004](0004-interoperable-document-collaboration.md), spec [section 8.3](../DOCUMENT-COLLABORATION-SPEC.md) · Code: [`tools/collab-spike/dcp-webdav/`](../../tools/collab-spike/dcp-webdav/), [`scripts/nextcloud-*.sh`](../../tools/collab-spike/scripts/), workflow [`collab-spike.yml`](../../.github/workflows/collab-spike.yml)
 
 **These results come from two Nextcloud builds, 34.0.5 and 35.0.2 (the official `nextcloud:*-apache` images, pinned by digest below), with PostgreSQL 16, on GitHub-hosted 2-core runners, over plain HTTP on one docker network, driven by our own tests. Every observation is of those builds and those runs. They are not a compatibility statement about Nextcloud, ownCloud, or OCM servers in general: no other OCM implementation (CERNBox, OpenCloud, Seafile, the OCM-stub reference) was run, nothing ran over HTTPS, and the Open Cloud Mesh *sender* role was Nextcloud's alone.** Anything not run is listed under [Not verified](#not-verified).
 
@@ -50,7 +50,7 @@ What this does not show: other servers, HTTPS, HTTP message signature *verificat
 - `clock::ServerClock`: the server's clock to the millisecond, found by locating the instant its `Date` header ticks over (the header is whole seconds).
 - `ocm::OcmReceiver`: a receiving OCM server with no file store: it serves discovery, accepts `POST /ocm/shares` and `/ocm/notifications`, and records every request verbatim. `accept_pending_remote_shares` drives a Nextcloud receiver's own OCS to accept what arrived. There is no sender (Nextcloud was the only one).
 
-Everything runs in `.github/workflows/collab-spike-e.yml`:
+Everything runs in `.github/workflows/collab-spike.yml` (the jobs `webdav-probe` and `webdav`; the spike ran them as `collab-spike-e.yml`, merged at integration):
 
 ```
 # the two servers (scripts/nextcloud-up.sh a b): containers nc-a, nc-b + a PostgreSQL each,

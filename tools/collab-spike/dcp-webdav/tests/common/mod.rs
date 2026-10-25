@@ -209,6 +209,9 @@ pub enum Topology {
     Federated,
 }
 
+/// The lease duration of `lease_expiry_releases` over a federation, in milliseconds.
+pub const FEDERATED_LEASE_MS: u64 = 20_000;
+
 pub struct NcFactory {
     pub topology: Topology,
     pub clock_a: Arc<ServerClock>,
@@ -313,6 +316,13 @@ impl StoreFactory for NcFactory {
                 .await?
             }
         };
+        if self.topology == Topology::Federated {
+            // Spec test 5 needs the renewal, its read-backs and two more reads to fit inside
+            // the renewed lease, and every federated operation is two server hops. A 4 s
+            // lease failed in most federated runs (7 of 8; docs/rfc/0004-spike-e-results.md)
+            // and 20 s passed in every run on both Nextcloud versions (`lease_timing.rs`).
+            fx.lease_ms = FEDERATED_LEASE_MS;
+        }
         fx.forger = Some(Arc::new(NcForger { viewer }));
         Ok(fx)
     }
