@@ -107,12 +107,9 @@ EXPORT = {
     "tables/chart-scatter",
     "tables/conditional",
 }
-# NOTE (tables/chart-pie, documented amber): both-green on screenshots;
-# export sits in the amber band on Tesseract exact-match noise, not an
-# exporter gap — the Q4 legend glyph OCRs as "ma" in LibreOffice's PDF vs
-# "mq4" in ours (pixels equivalent), so word recall is 0.833 < 0.90 with
-# lost_lines 0. Same class as the letters/nested-list amber; covering it
-# keeps every eligible fixture inside the ratchet instead of outside it.
+# tables/chart-pie export's Q4 legend key is dark purple. OCR must remove
+# coloured keys using brightness-relative saturation (compare.erase_keys),
+# otherwise it joins the key to Q4 as "ma"/"mq4" and falsely ambers the PDF.
 #
 # NOTE (letters/nested-list #1127, letters/super-subscript #1115: accepted
 # OCR-artifact ambers, same class as render #904). Reduced to a layout/pango
