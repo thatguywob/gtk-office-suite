@@ -16,13 +16,17 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "tools", "rende
 
 @unittest.skipIf(np is None, "numpy and Pillow are the render lab's")
 class UnprintedHeadingsTest(unittest.TestCase):
-    def aligned(self, factor=1, moved=False):
+    def aligned(self, factor=1, moved=False, ruled=False, clipped=False):
         import compare
 
         cells = np.full((80, 120, 3), 255, dtype=np.uint8)
         cells[10:18, 10:35] = 0
         cells[40:48, 10:25] = 0
         cells[40:48, 50:85] = 0
+        if ruled:
+            cells[20:70, 5] = 0
+        if clipped:
+            cells[79, 10:35] = 0
         ref = Image.new("RGB", (220, 180), "white")
         ref.paste(Image.fromarray(cells), (30, 40))
         if moved:
@@ -33,6 +37,8 @@ class UnprintedHeadingsTest(unittest.TestCase):
         ours.paste((240, 240, 240), (0, 0, ours.width, 20))
         ours.paste((240, 240, 240), (0, 0, 40, ours.height))
         ours.paste(cells, (40, 20))
+        if clipped:
+            ours = ours.crop((0, 0, ours.width, 20 + cells.height))
         with tempfile.TemporaryDirectory() as directory:
             rp, op = os.path.join(directory, "ref.png"), os.path.join(directory, "ours.png")
             ref.save(rp)
@@ -51,3 +57,12 @@ class UnprintedHeadingsTest(unittest.TestCase):
     def test_internal_layout_difference_remains_visible(self):
         ref, ours, _ = self.aligned(moved=True)
         self.assertFalse(np.array_equal(np.asarray(ref), np.asarray(ours)))
+
+    def test_partial_borders_keep_the_existing_alignment(self):
+        # Two vertical rules cannot establish a printed heading frame.
+        ref, ours, scale = self.aligned(ruled=True)
+        self.assertGreater(scale, 1.1)
+
+    def test_clipped_viewport_does_not_claim_corresponding_ink_boxes(self):
+        ref, ours, scale = self.aligned(clipped=True)
+        self.assertGreater(scale, 1.1)
