@@ -680,7 +680,7 @@ mod tests {
                     mime: "application/x".into(),
                     size: 1,
                     sha256: "0".repeat(64),
-                    locator: dcp_core::Locator::Url {
+                    locator: dcp_core::Locator::DurableStream {
                         href: "https://h.invalid/dcp/d/f/x".into(),
                     },
                 },

@@ -39,20 +39,18 @@ pub fn parse_principal(s: &str) -> Option<VerifyingKey> {
     s.parse().ok()
 }
 
-/// The locator a version's file gets. The draft-1 locator table has no content-addressed entry,
-/// so the BLAKE3 hash is carried as an `https` URL that is never fetched (see the results
-/// document, "Spec corrections").
+/// The locator a version's file gets: `blake3`, the hash of the bytes the provider serves (spec
+/// 4.2.1, added in draft 1 update 2). Those bytes are the sealed file, so the hash is not the
+/// version's `sha256`. `blake3_hex` is iroh's lower-case 64-digit hex form.
 pub fn blob_locator(blake3_hex: &str) -> dcp_core::Locator {
-    dcp_core::Locator::Url {
-        href: format!("https://iroh-blobs.invalid/{blake3_hex}"),
+    dcp_core::Locator::Blake3 {
+        hash: blake3_hex.to_owned(),
     }
 }
 
 pub fn blob_of_locator(loc: &dcp_core::Locator) -> Option<String> {
     match loc {
-        dcp_core::Locator::Url { href } => href
-            .strip_prefix("https://iroh-blobs.invalid/")
-            .map(|s| s.to_string()),
+        dcp_core::Locator::Blake3 { hash } => Some(hash.clone()),
         _ => None,
     }
 }

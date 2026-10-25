@@ -459,7 +459,7 @@ async fn record_overhead_in_bytes() {
     let log = rig.path(n, "log").await;
     let last = raw(&rig.owner, &log).await.pop().unwrap();
     let file_id = match &v.body.file.locator {
-        dcp_core::Locator::Url { href } => href.rsplit('/').next().unwrap().to_owned(),
+        dcp_core::Locator::DurableStream { href } => href.rsplit('/').next().unwrap().to_owned(),
         _ => unreachable!(),
     };
     let blob = rig

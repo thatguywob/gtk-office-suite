@@ -89,7 +89,7 @@ async fn a_server_that_gates_by_credential_refuses_a_viewers_forgery_but_cannot_
     let forged = serde_json::json!({"st": st, "body": {
         "dcp": 1, "parents": [first],
         "file": {"mime": "application/x", "size": 1, "sha256": "0".repeat(64),
-                 "locator": {"type": "url", "href": "https://x.invalid/dcp/d/f/z"}},
+                 "locator": {"type": "durable-stream", "href": "https://x.invalid/dcp/d/f/z"}},
         "created_by": {"principal": viewer.principal(), "device": "V"}}});
     assert_eq!(
         viewer

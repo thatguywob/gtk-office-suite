@@ -99,7 +99,7 @@ fn inner_version(rig_first: &str, author: &str, st: u64) -> Value {
             "dcp": 1,
             "parents": [rig_first],
             "file": {"mime": "application/x", "size": 3, "sha256": "0".repeat(64),
-                     "locator": {"type": "url", "href": "https://x.invalid/dcp/d/f/zzz"}},
+                     "locator": {"type": "durable-stream", "href": "https://x.invalid/dcp/d/f/zzz"}},
             "created_by": {"principal": author, "device": "EVIL"}
         }
     })
@@ -312,8 +312,8 @@ trait LocatorHref {
 impl LocatorHref for dcp_core::FileRef {
     fn locator_href(&self) -> &str {
         match &self.locator {
-            dcp_core::Locator::Url { href } => href,
-            _ => panic!("not a url locator"),
+            dcp_core::Locator::DurableStream { href } => href,
+            _ => panic!("not a durable-stream locator"),
         }
     }
 }

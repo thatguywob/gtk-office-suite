@@ -429,7 +429,7 @@ spike):
 
 1. **8.4 "Reserved"**: replace the sentence about iroh and p2panda with the measured text below. State that
    p2panda-blobs is an empty crate and that p2panda-net's sync cannot be gated.
-2. **4.2.1 locator table** needs a content-addressed entry. Proposed:
+2. **4.2.1 locator table** needs a content-addressed entry. *(Applied in draft 1 update 2: `blake3`, and at integration `dcp-p2p` emits it; the results below were measured with the never-fetched `url`.)* Proposed:
    `locator.type` `blake3` with `hash` (the BLAKE3 hash, 64 hex, of the bytes the provider serves; the
    plaintext `sha256` and `size` stay as they are, so the two hashes differ whenever the served bytes
    are encrypted). The spike used a never-fetched `url` as a stand-in.

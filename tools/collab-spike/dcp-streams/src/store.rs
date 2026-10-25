@@ -428,9 +428,12 @@ impl StreamsStore {
     }
 
     fn file_id_of(doc: &str, locator: &Locator) -> Result<String> {
-        let Locator::Url { href } = locator else {
+        // `url` is not accepted: its bytes would have to hash to `sha256`, and these are ciphertext
+        // (spec 4.2.1, draft 1 update 2).
+        let Locator::DurableStream { href } = locator else {
             return Err(StoreError::Invalid(
-                "this binding only reads `url` locators that name a stream of the document".into(),
+                "this binding only reads `durable-stream` locators that name a stream of the document"
+                    .into(),
             ));
         };
         // Scheme, host and base path are ignored on purpose: a version's
@@ -756,7 +759,7 @@ impl StreamsStore {
         let file_ref = integrity::file_ref(
             &file.mime,
             &file.bytes,
-            Locator::Url {
+            Locator::DurableStream {
                 href: self.href(doc, &file_id),
             },
         );
@@ -1146,5 +1149,42 @@ impl DocumentStore for StreamsStore {
             .iter()
             .flat_map(|e| e.updates.iter().cloned())
             .collect())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_file_stream_is_named_by_a_durable_stream_locator() {
+        let l = Locator::DurableStream {
+            href: "https://anywhere.invalid/base/dcp/doc1/f/q83JmVnH2xZk_0Tb".into(),
+        };
+        // Scheme, host and base path are the reader's own, never the locator's.
+        assert_eq!(
+            StreamsStore::file_id_of("doc1", &l).unwrap(),
+            "q83JmVnH2xZk_0Tb"
+        );
+        let other_doc = Locator::DurableStream {
+            href: "https://anywhere.invalid/dcp/doc2/f/x".into(),
+        };
+        assert!(StreamsStore::file_id_of("doc1", &other_doc).is_err());
+    }
+
+    /// The bytes behind this locator are ciphertext: a `url` reader would fetch them and fail the
+    /// `sha256`, so the binding refuses every other locator type (spec 4.2.1).
+    #[test]
+    fn a_url_or_blake3_locator_is_not_a_file_stream() {
+        for l in [
+            Locator::Url {
+                href: "https://h.invalid/dcp/doc1/f/x".into(),
+            },
+            Locator::Blake3 {
+                hash: "0".repeat(64),
+            },
+        ] {
+            assert!(StreamsStore::file_id_of("doc1", &l).is_err(), "{l:?}");
+        }
     }
 }

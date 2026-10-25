@@ -900,8 +900,11 @@ per version) 127 ms for 2 versions, 306 ms for 10, 754 ms for 30, a lease read 5
 write 104 ms.
 
 **Conformance (section 12).** On one Nextcloud (34.0.5 and 35.0.2): 9 passed, 0 failed, 2 skipped
-(tests 8 and 9: no L2). Across an OCM federation: 8 passed, 1 failed (test 5 with a 4 s lease,
-which passes at 20 s on every topology and build), 2 skipped.
+(tests 8 and 9: no L2). Across an OCM federation: 9 passed, 0 failed, 2 skipped, with the
+federated fixture's lease of 20 s for test 5 (`Fixture::lease_ms` in `dcp-conformance`; the
+journey's default is 4 s, at which it failed in 7 of 8 federated runs before the duration was a
+parameter, and which still passes on one server). Both Nextcloud versions passed in the
+integration run.
 
 **Not offered.** L2, L3, encryption (the server sees everything it stores), notification of a
 permission change, `commenter`, and `owner` across a federation.
@@ -1330,7 +1333,7 @@ Results of the journeys of this section, each from the run its section cites:
 | Matrix (8.1), relaxed, default and default-drained limits | 11 | 0 | 0 |
 | WOPI host over the Matrix binding (8.2) | 5 | 0 | 6 |
 | Nextcloud, one server (8.3) | 9 | 0 | 2 (no L2) |
-| Nextcloud, two servers over OCM (8.3) | 8 | 1 (test 5 at 4 s; passes at 20 s) | 2 (no L2) |
+| Nextcloud, two servers over OCM (8.3) | 9 (test 5 with a 20 s lease) | 0 | 2 (no L2) |
 | Durable Streams, Node 0.3.9 and Go 0.3.0 (8.4) | 11 | 0 | 0 |
 | iroh and p2panda (8.5) | 11 | 0 | 0 |
 

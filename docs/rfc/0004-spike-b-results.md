@@ -385,7 +385,7 @@ Not built beyond one test, and the verdict on it is "partial".
 ## Spec corrections
 
 1. **Proposed 8.4** (below).
-2. **4.2.1, locator.** The four types do not fit a stream whose bytes are ciphertext: a `url` reader fetches
+2. **4.2.1, locator.** *(Applied in draft 1 update 2: the type is `durable-stream`, and at integration `dcp-streams` emits it and refuses `url`; the results below were measured with `url`.)* The four types do not fit a stream whose bytes are ciphertext: a `url` reader fetches
    ciphertext and fails the `sha256`. This spike used `url` with the `https` form of the stream and reads
    by path. Either add a type (`{"type": "durable-stream", "href": "https://..."}` with the rule that the
    reader resolves it against its own server, so a version cannot make it fetch from another host) or state
