@@ -43,6 +43,13 @@ document turns green. Real documents mix many features, so the way to
 move one is to reduce its defect to a single-feature fixture, which gets
 its own `render-parity` issue; a regression fails the ratchet instead.
 
+Tables references can omit printed row and column headings. In that case
+the scorer removes the editor's screen headings and compares the two ink
+bounding boxes, including their relative scale. It cannot use the editor's
+used-range rectangle against an ink-cropped PDF: trailing cell whitespace
+would stretch the text. `tables/unprinted-headings` is the reduced fixture
+for this case (Mining Remediation Authority financial statements, #1348).
+
 ## Licences and attribution
 
 Every document is published under an open government licence that
