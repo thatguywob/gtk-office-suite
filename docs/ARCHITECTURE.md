@@ -29,6 +29,13 @@ The rule that keeps it honest: **a GTK window never owns authoritative
 document state.** See [Canonical Document Controllers](#canonical-document-controllers--threading-rules)
 below.
 
+The dependency rule that keeps cores modular: **sibling core crates must never
+depend on one another (ADR 0012).** Sibling applications (`letters-core`,
+`tables-core`, `decks-core`) are peer persistence adapters that may depend on
+`suite-common-core` (and `suite-export`), never on each other. Shared document
+and clipboard primitives live behind `suite-common-core` rather than the Letters
+application boundary.
+
 > **Which `suite-common`?** Two other repositories in the organisation
 > carry this name — a standalone Python/meson library, and
 > `suite-common-rust`, a smaller separately-maintained Rust crate.
@@ -45,7 +52,7 @@ Nine crates. Line counts are indicative of weight, not targets.
 
 | Crate | GTK? | Published | Holds |
 |---|---|---|---|
-| `suite-common-core` | no | yes | Undo, number formats, styles, property pool, search, print, units, atomic saves, autosave, ZIP bounds, interop reports |
+| `suite-common-core` | no | yes | Undo, number formats, styles, property pool, search, print, units, atomic saves, autosave, ZIP bounds, interop reports, shared document primitives (ADR 0012) |
 | `suite-common` | yes | no | Command palette, shortcuts dialog, file dialogs, toasts, GTK test helpers |
 | `suite-export` | no | yes | PDF export |
 | `letters-core` | no | no | Document model, DOCX/ODT/Markdown I/O, structured editing, sessions |
