@@ -72,7 +72,7 @@
     "export": "green"
   },
   "letters/nested-list": {
-    "export": "amber"
+    "export": "green"
   },
   "letters/numbered-list": {
     "export": "green"
@@ -96,7 +96,7 @@
     "export": "green"
   },
   "letters/super-subscript": {
-    "export": "amber"
+    "export": "green"
   },
   "letters/text-color": {
     "export": "green"
