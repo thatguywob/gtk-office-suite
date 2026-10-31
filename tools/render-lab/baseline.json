@@ -129,8 +129,8 @@
     "C": "green"
   },
   "letters/font-sizes": {
-    "A": "amber",
-    "B": "amber",
+    "A": "green",
+    "B": "green",
     "C": "green"
   },
   "letters/footnote-continued": {
@@ -345,7 +345,8 @@
   },
   "tables/number-formats": {
     "A": "green",
-    "B": "green"
+    "B": "green",
+    "C": "amber"
   },
   "tables/pivot-crosstab": {
     "A": "green",
