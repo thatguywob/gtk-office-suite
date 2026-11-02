@@ -89,3 +89,17 @@ The synthetic fixture isolates the cell-level content control drop for focused i
 As local environments lack the container engine/GUI build runtime to measure the full real corpus,
 `tools/render-lab/baseline-real.json` remains untouched until measured on CI.
 The real-document acceptance criteria (turning green in both Tier A and Tier B) remain open on #1359.
+
+## Measured synthetic baseline
+
+[CI run 41349092595](https://github.com/tuna-os/gtk-office-suite/actions/runs/41349092595)
+measured this fixture green in Tiers A and B, with all reference words found
+and zero lost lines. Reviewed the captured Letters and LibreOffice images and
+locked those measured verdicts into `tools/render-lab/baseline.json`. The check
+failed only because the new fixture was absent from the baseline (`RATCHET STALE`).
+The reference image also omits the content-control placeholder text, while
+Letters retains the two-column grid and the final ordinary cell text. The green
+score (0.57pt displacement, SSIM 0.966) therefore does not establish that the
+missing placeholders in the real document are fixed. A stronger reduction is
+still needed to make those placeholders visible in the LibreOffice reference.
+The real-document acceptance criteria above remain open.
