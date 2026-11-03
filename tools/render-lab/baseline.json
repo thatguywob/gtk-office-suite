@@ -96,6 +96,10 @@
     "B": "green",
     "C": "green"
   },
+  "letters/bullet-symbol-font-line-height": {
+    "A": "amber",
+    "B": "amber"
+  },
   "letters/char-emphasis": {
     "A": "green",
     "B": "green",
@@ -206,6 +210,10 @@
     "B": "green",
     "C": "green"
   },
+  "letters/odt-page-break-spacing": {
+    "A": "amber",
+    "B": "amber"
+  },
   "letters/page-break": {
     "A": "green",
     "B": "green",
@@ -271,6 +279,14 @@
     "A": "green",
     "B": "green",
     "C": "green"
+  },
+  "letters/underline-position": {
+    "A": "red",
+    "B": "red"
+  },
+  "letters/url-path-wrapping": {
+    "A": "amber",
+    "B": "amber"
   },
   "tables/alignment": {
     "A": "green",
@@ -346,6 +362,10 @@
     "B": "green",
     "C": "green"
   },
+  "tables/hyperlink-theme-colors": {
+    "A": "amber",
+    "B": "amber"
+  },
   "tables/merged": {
     "A": "green",
     "B": "green",
@@ -365,6 +385,10 @@
     "B": "green",
     "C": "green"
   },
+  "tables/wide-column-no-headings": {
+    "A": "amber",
+    "B": "amber"
+  },
   "tables/wrap-merged": {
     "A": "amber",
     "B": "amber"
@@ -373,5 +397,9 @@
     "A": "amber",
     "B": "amber",
     "C": "amber"
+  },
+  "tables/wrap-wide-default-font": {
+    "A": "amber",
+    "B": "amber"
   }
 }
